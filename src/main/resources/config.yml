@@ -1,0 +1,50 @@
+# Claims Configuration
+language: en
+
+command-aliases:
+  register-standalone-aliases: true
+
+modules:
+  claim:
+    enabled: true
+
+database:
+  file: claims.db
+  pool-size: 4
+
+claims:
+  enabled-worlds: [ ] # Empty means enabled in all worlds
+  claim-tool: GOLDEN_SHOVEL
+  inspect-tool: STICK
+  initial-claim-blocks: 400
+  accrual-blocks-per-hour: 120
+  max-accrued-blocks: 80000
+  min-claim-width: 5
+  min-claim-area: 25
+  auto-claim-radius: 7
+  abandon-refund-ratio: 1.0
+  visualization-duration-seconds: 30
+  limit-tree-growth: true
+  prevent-non-player-portals: true
+  unused-cleanup:
+    enabled: false
+    inactive-days: 60
+    max-area-to-expire: 2500
+  default-flags:
+    pvp: false
+    explosions: false
+    fire-spread: false
+    mob-griefing: false
+    public-access: false
+    piston-cross-border: false
+    entry-notify: true
+
+ui:
+  actionbar:
+    enabled: true
+    refresh-ticks: 10
+    denial-cooldown-ms: 1500
+  bossbar:
+    enabled: true
+    show-mode-banner: true
+    show-territory-banner: false

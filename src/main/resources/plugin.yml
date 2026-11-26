@@ -1,0 +1,28 @@
+name: Claims
+version: '${version}'
+main: claims.Claims
+api-version: '1.20'
+folia-supported: true
+description: Preventive land claims, hierarchical trust matrix, and territory protection for Paper.
+authors: [ Claims ]
+
+commands:
+  claims:
+    description: Open the Claims dashboard GUI or execute subcommands
+    usage: /claims [claim|list|settings|trust|untrust|extend|transfer|restrict|abandon|abandonall|subdivide|adminclaims|adjustblocks|trapped|cancel|admin|status|reload|alias|aliases]
+    aliases: [ cl ]
+    permission: claims.use
+
+permissions:
+  claims.use:
+    description: Access the Claims dashboard and basic commands
+    default: true
+  claims.claim:
+    description: Create, abandon, and manage personal claims and trusts
+    default: true
+  claims.admin:
+    description: Bypass all claim protections, manage admin claims, and reload config
+    default: op
+    children:
+      claims.use: true
+      claims.claim: true
