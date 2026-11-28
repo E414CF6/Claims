@@ -1,3 +1,11 @@
+# ==============================================================================
+# Claims English Messages (messages_en.yml)
+# ==============================================================================
+# Uses Kyori Adventure MiniMessage formatting: https://docs.advntr.dev/minimessage/format.html
+# Placeholders such as {owner}, {w}, {l}, {area}, {available} are escaped safely.
+# ==============================================================================
+
+# --- Prefix & HUD ---
 prefix: "<gradient:#38bdf8:#818cf8><bold>Claims</bold></gradient> <dark_gray>»</dark_gray> "
 wilderness: "<#4ade80>🌿 Wilderness</#4ade80>"
 claim-hud: "<#38bdf8>🛡 {owner}</#38bdf8> <gray>({name})</gray> {badge}"
@@ -5,32 +13,63 @@ claim-hud-admin: "<#f59e0b>⚜ Admin Claim</#f59e0b> <gray>({name})</gray>"
 shovel-corner-hud: "<#38bdf8>📐 Corner ({x}, {z})</#38bdf> <gray>| Preview: {w}×{l} ({area} blocks) | Available: {available}</gray>"
 shovel-idle-hud: "<#38bdf8>⛏ Claim Tool ({mode})</#38bdf> <gray>| Right-click corners | Available: {available}</gray>"
 
+# --- BossBar Mode Banners ---
+bossbar-resizing: "<aqua>📐 Resizing claim — Right-click the new corner position</aqua>"
+bossbar-subdividing: "<light_purple>⊞ Creating subclaim — Right-click the opposite corner</light_purple>"
+bossbar-creating: "<aqua>📐 Creating new claim — Right-click the diagonal opposite corner</aqua>"
+
+# --- General & Command Errors ---
 no-permission: "<red>You do not have permission to do that.</red>"
 player-only: "<red>Only players can execute this command.</red>"
 reload-done: "<green>Claims configuration and messages reloaded.</green>"
+command-disabled: "<red>Subcommand <white>/{command}</white> is disabled in command-aliases.yml.</red>"
+player-not-found: "<red>Player <white>{target}</white> has never joined this server.</red>"
+invalid-integer: "<red>Amount must be a valid integer.</red>"
+world-disabled: "<red>Claims are disabled in this world.</red>"
 
+# --- Protection Denials ---
 deny-build: "<red>✖ No build permission</red> <gray>(Owner: {owner})</gray>"
 deny-container: "<red>✖ No container permission</red> <gray>(Owner: {owner})</gray>"
 deny-access: "<red>✖ No access permission</red> <gray>(Owner: {owner})</gray>"
 deny-manage: "<red>✖ No manage permission</red> <gray>(Owner: {owner})</gray>"
 deny-pvp: "<red>✖ PvP is disabled inside this claim.</red>"
 
+# --- Claim Creation, Resizing & Metadata ---
 claim-created: "<green>Claim created! Size: <white>{w}×{l}</white> (<white>{area}</white> blocks)</green>"
 claim-resized: "<green>Claim resized! New size: <white>{w}×{l}</white> (<white>{area}</white> blocks)</green>"
 subclaim-created: "<green>Subclaim created!</green>"
 claim-abandoned: "<yellow>Claim abandoned. Refunded claim blocks: <white>{refund}</white></yellow>"
+claims-abandoned-all: "<yellow>Abandoned all <white>{count}</white> claims. Refunded claim blocks: <white>{refund}</white></yellow>"
 claim-overlap: "<red>This claim overlaps an existing claim.</red>"
 claim-too-small: "<red>Claim is smaller than minimum size ({min_w}×{min_w}, {min_area} blocks).</red>"
 claim-insufficient-blocks: "<red>Not enough claim blocks! Needed: <white>{needed}</white>, Available: <white>{available}</white></red>"
+outside-parent: "<red>Subclaim cannot extend outside its parent claim.</red>"
+claim-update-failed: "<red>Unable to create or update claim.</red>"
 not-in-claim: "<red>You are not standing inside a claim.</red>"
+must-be-in-subclaim: "<yellow>You must be standing inside a subclaim.</yellow>"
+no-claims-owned: "<gray>You do not own any claims.</gray>"
+claim-transferred: "<green>Transferred claim ownership to <white>{target}</white>.</green>"
+claim-renamed: "<green>Renamed claim to <white>{name}</white>.</green>"
+claim-greeting-updated: "<green>Updated entry greeting to: <white>{greeting}</white></green>"
+claim-greeting-cleared: "<yellow>Cleared claim entry greeting.</yellow>"
+
+# --- Trust & Subclaim Isolation ---
 trust-updated: "<green>Granted <aqua>{level}</aqua> trust to <white>{target}</white>.</green>"
 trust-removed: "<yellow>Removed trust for <white>{target}</white>.</yellow>"
+trust-cleared-all: "<yellow>Removed all trust entries from this claim.</yellow>"
+subclaim-restricted: "<aqua>Subclaim inheritNothing set to: <white>{state}</white></aqua>"
+
+# --- Inspection, Tools & Escape ---
+claim-inspect: "<aqua>[{name}]</aqua> <gray>Owner:</gray> <white>{owner}</white> <gray>| Size:</gray> <white>{w}×{l} ({area} blocks)</white> <gray>| Your Trust:</gray> <green>{trust}</green>"
+claim-nearby-highlighted: "<gray>Highlighted nearby claim (<white>{name}</white>, Owner: <white>{owner}</white>).</gray>"
+claim-none-nearby: "<gray>No claims found nearby.</gray>"
+mode-switched: "<aqua>Claim tool mode switched to <white>{mode}</white>.</aqua>"
+mode-switched-admin: "<gold>Claim tool mode switched to <white>{mode}</white>.</gold>"
+selection-cleared: "<gray>Cleared active claim selection.</gray>"
 trapped-success: "<green>Teleported you to a safe location outside the claim.</green>"
 trapped-not-needed: "<yellow>You do not need /trapped here.</yellow>"
-
-claim-transferred: "<green>Transferred claim ownership to <white>{target}</white>.</green>"
-claims-abandoned-all: "<yellow>Abandoned all <white>{count}</white> claims. Refunded claim blocks: <white>{refund}</white></yellow>"
-subclaim-restricted: "<aqua>Subclaim inheritNothing set to: <white>{state}</white></aqua>"
+trapped-no-safe-spot: "<red>Could not find a nearby safe wilderness spot.</red>"
 portal-trap-rescued: "<green>Detected portal trap and moved you to safety.</green>"
+
+# --- Admin ---
 claim-blocks-adjusted: "<green>Adjusted claim blocks for <white>{target}</white> (Bonus: <white>{bonus}</white>, Available: <white>{available}</white>).</green>"
-command-disabled: "<red>Subcommand <white>/{command}</white> is disabled in command-aliases.yml.</red>"

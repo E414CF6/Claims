@@ -5,8 +5,14 @@ import claims.modules.claim.ClaimFlag
 import org.bukkit.Material
 import org.bukkit.configuration.file.FileConfiguration
 import org.bukkit.plugin.java.JavaPlugin
-import java.util.Locale
+import java.util.*
 
+/**
+ * Strongly typed, validated snapshot of `config.yml`.
+ *
+ * All numeric bounds are sanitized in [load] so malformed admin edits cannot crash
+ * claim sizing, refund calculations, or scheduler intervals.
+ */
 data class ClaimsConfig(
     val language: String = "en",
     val registerStandaloneAliases: Boolean = true,
@@ -37,12 +43,15 @@ data class ClaimsConfig(
     val bossBarModeBanner: Boolean = true,
     val bossBarTerritoryBanner: Boolean = false,
 ) {
+    /** Returns `true` if claiming/protection is active in [worldName] (empty set = all worlds). */
     fun isWorldEnabled(worldName: String): Boolean =
         enabledWorlds.isEmpty() || enabledWorlds.contains(worldName)
 
+    /** Returns whether module [id] is enabled in `config.yml`, falling back to [defaultEnabled]. */
     fun isModuleEnabled(id: String, defaultEnabled: Boolean = true): Boolean =
         moduleEnabledMap[id.lowercase(Locale.ROOT)] ?: defaultEnabled
 
+    /** Projects ActionBar-specific settings for [ActionBarSettings] consumers. */
     fun actionBarSettings(): ActionBarSettings = ActionBarSettings(
         enabled = actionBarEnabled,
         refreshTicks = actionBarRefreshTicks,
@@ -50,6 +59,10 @@ data class ClaimsConfig(
     )
 
     companion object {
+        /**
+         * Ensures default `config.yml` exists, reloads it from disk, and parses all fields
+         * with safe fallbacks and clamped ranges.
+         */
         fun load(plugin: JavaPlugin): ClaimsConfig {
             plugin.saveDefaultConfig()
             plugin.reloadConfig()
@@ -73,17 +86,28 @@ data class ClaimsConfig(
                 ClaimFlag.ENTRY_NOTIFY to cfg.getBoolean("claims.default-flags.entry-notify", true),
             )
 
+            val rawClaimTool = cfg.getString("claims.claim-tool") ?: "GOLDEN_SHOVEL"
+            val claimTool = Material.matchMaterial(rawClaimTool) ?: run {
+                plugin.logger.warning("Invalid claims.claim-tool '$rawClaimTool'; falling back to GOLDEN_SHOVEL.")
+                Material.GOLDEN_SHOVEL
+            }
+            val rawInspectTool = cfg.getString("claims.inspect-tool") ?: "STICK"
+            val inspectTool = Material.matchMaterial(rawInspectTool) ?: run {
+                plugin.logger.warning("Invalid claims.inspect-tool '$rawInspectTool'; falling back to STICK.")
+                Material.STICK
+            }
+
             return ClaimsConfig(
-                language = cfg.getString("language", "en") ?: "en",
+                language = cfg.getString("language", "en")?.trim()?.ifEmpty { "en" } ?: "en",
                 registerStandaloneAliases = cfg.getBoolean("command-aliases.register-standalone-aliases", true),
                 moduleEnabledMap = moduleFlags,
-                databaseFile = cfg.getString("database.file", "claims.db") ?: "claims.db",
+                databaseFile = cfg.getString("database.file", "claims.db")?.trim()?.ifEmpty { "claims.db" }
+                    ?: "claims.db",
                 databasePoolSize = cfg.getInt("database.pool-size", 4).coerceAtLeast(1),
-                enabledWorlds = cfg.getStringList("claims.enabled-worlds").toSet(),
-                claimTool = Material.matchMaterial(cfg.getString("claims.claim-tool") ?: "GOLDEN_SHOVEL")
-                    ?: Material.GOLDEN_SHOVEL,
-                inspectTool = Material.matchMaterial(cfg.getString("claims.inspect-tool") ?: "STICK")
-                    ?: Material.STICK,
+                enabledWorlds = cfg.getStringList("claims.enabled-worlds").map { it.trim() }.filter { it.isNotEmpty() }
+                    .toSet(),
+                claimTool = claimTool,
+                inspectTool = inspectTool,
                 initialClaimBlocks = cfg.getInt("claims.initial-claim-blocks", 400).coerceAtLeast(0),
                 accrualBlocksPerHour = cfg.getInt("claims.accrual-blocks-per-hour", 120).coerceAtLeast(0),
                 maxAccruedBlocks = cfg.getInt("claims.max-accrued-blocks", 80000).coerceAtLeast(100),

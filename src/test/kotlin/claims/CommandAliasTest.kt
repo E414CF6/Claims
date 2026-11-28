@@ -73,6 +73,16 @@ class CommandAliasTest {
     }
 
     @Test
+    fun `AliasMatcher extractRemainder handles case-insensitive and wildcard aliases`() {
+        val wildcard = CommandAliasEntry(alias = "myclaim ?", commands = listOf("claims claim \$1-"))
+        assertEquals("12", AliasMatcher.extractRemainder(wildcard, "MYCLAIM 12"))
+        assertEquals("", AliasMatcher.extractRemainder(wildcard, "myclaim"))
+
+        val exactPrefix = CommandAliasEntry(alias = "trust", commands = listOf("claims trust \$1-"))
+        assertEquals("Alice build", AliasMatcher.extractRemainder(exactPrefix, "TRUST Alice build"))
+    }
+
+    @Test
     fun `CommandRegistry respects standaloneByDefault and resolves aliases case-insensitively`() {
         val registry = CommandRegistry()
         registry.registerSubcommand(

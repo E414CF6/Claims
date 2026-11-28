@@ -20,6 +20,11 @@ import java.lang.reflect.Method
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Manages standalone subcommand aliases (`command-aliases.yml`), custom user aliases/macros
+ * (`aliases.yml`), Bukkit `CommandMap` proxy registration, client command-tree syncing, and
+ * command preprocessing/tab-completion.
+ */
 class CommandAliasService(private val host: CoreHost) : Listener {
 
     private val commandAliasFile = File(host.plugin.dataFolder, "command-aliases.yml")
@@ -274,6 +279,7 @@ class CommandAliasService(private val host: CoreHost) : Listener {
     private fun createDefaultCustomAliases() {
         val defaults = host.defaultCustomAliases
         val yaml = YamlConfiguration()
+        applyCustomAliasHeader(yaml)
         for ((k, v) in defaults) {
             yaml.set("aliases.$k", v)
         }
@@ -292,6 +298,7 @@ class CommandAliasService(private val host: CoreHost) : Listener {
     private fun saveCustomAliases() {
         val snapshot = synchronized(this) { customAliases.toMap() }
         val yaml = YamlConfiguration()
+        applyCustomAliasHeader(yaml)
         for ((key, entry) in snapshot) {
             if (!entry.requiresPerm && !entry.exact && !entry.addTabs && entry.tabComplete && entry.customTabs.isEmpty() && entry.enabled) {
                 yaml.set("aliases.$key", entry.commands)
@@ -309,6 +316,18 @@ class CommandAliasService(private val host: CoreHost) : Listener {
             customAliasFile.parentFile?.mkdirs()
             yaml.save(customAliasFile)
         }
+    }
+
+    private fun applyCustomAliasHeader(yaml: YamlConfiguration) {
+        yaml.options().setHeader(
+            listOf(
+                "${host.pluginDisplayName} Custom Command Aliases (aliases.yml)",
+                "Define shortcuts or multi-step command macros under 'aliases.<name>'.",
+                "Placeholders: \$1, \$2 (positional args), \$1- / {args} (remaining args), {player}, {world}.",
+                "Prefixes: console:, player:, op:, msg:, broadcast:, actionbar:, bossbar:COLOR|SEC|TEXT, sound:, delay:SEC.",
+                "Optional section keys: cmds, enabled, perm (requires ${host.customAliasPermissionPrefix}<alias>), tab, exact-match, custom-tabs.",
+            )
+        )
     }
 
     private fun rebuildCache() {
@@ -442,7 +461,7 @@ class CommandAliasService(private val host: CoreHost) : Listener {
                 val cmdLine = expanded.first().removePrefix("/").trim()
                 if (cmdLine.isEmpty()) true else Bukkit.dispatchCommand(sender, cmdLine)
             } else {
-                val remainder = rawCommand.removePrefix(entry.alias).trim()
+                val remainder = AliasMatcher.extractRemainder(entry, rawCommand)
                 SpecializedCommandExecutor.executeAll(
                     host,
                     expanded,
@@ -503,109 +522,83 @@ class CommandAliasService(private val host: CoreHost) : Listener {
 
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
     fun onPlayerCommandPreprocess(event: PlayerCommandPreprocessEvent) {
-        val raw = normalizeCommandInput(event.message) ?: return
-
-        val disabledSub = extractDisabledBaseSubcommand(raw)
-        if (disabledSub != null) {
-            event.isCancelled = true
-            host.messages.send(event.player, "command-disabled", mapOf("command" to disabledSub))
-            return
-        }
-
-        val entry = AliasMatcher.findBestMatch(raw, combinedAliases) ?: return
-        if (!entry.enabled) return
-
-        if (entry.type == CommandAliasType.CUSTOM && entry.requiresPerm &&
-            !event.player.hasPermission("${host.customAliasPermissionPrefix}${entry.permissionKey}") &&
-            !event.player.hasPermission(host.adminPermission)
-        ) {
-            event.isCancelled = true
-            host.messages.send(event.player, "no-permission")
-            return
-        }
-
-        val expanded = AliasMatcher.expandCommands(entry, raw, event.player.name)
-        if (expanded.isEmpty()) return
-
-        if (!AliasMatcher.isSpecializedAlias(expanded)) {
-            val targetCmd = expanded.first().removePrefix("/").trim()
-            if (targetCmd.isNotEmpty()) {
-                event.message = "/$targetCmd"
-            }
-        } else {
-            event.isCancelled = true
-            val remainder = raw.removePrefix(entry.alias).trim()
-            SpecializedCommandExecutor.executeAll(
-                host,
-                expanded,
-                event.player,
-                mapOf("args" to remainder, "player" to event.player.name),
-            )
-        }
+        handlePreprocess(
+            rawInput = event.message,
+            sender = event.player,
+            player = event.player,
+            cancel = { event.isCancelled = true },
+            rewriteCommand = { targetCmd -> event.message = "/$targetCmd" },
+        )
     }
 
     @EventHandler(priority = EventPriority.NORMAL, ignoreCancelled = true)
     fun onServerCommand(event: ServerCommandEvent) {
-        val raw = normalizeCommandInput(event.command) ?: return
-        val disabledSub = extractDisabledBaseSubcommand(raw)
-        if (disabledSub != null) {
-            event.isCancelled = true
-            host.messages.send(event.sender, "command-disabled", mapOf("command" to disabledSub))
-            return
-        }
-
-        val entry = AliasMatcher.findBestMatch(raw, combinedAliases) ?: return
-        if (!entry.enabled) return
-
-        val expanded = AliasMatcher.expandCommands(entry, raw, event.sender.name)
-        if (expanded.isEmpty()) return
-
-        if (!AliasMatcher.isSpecializedAlias(expanded)) {
-            val targetCmd = expanded.first().removePrefix("/").trim()
-            if (targetCmd.isNotEmpty()) {
-                event.command = targetCmd
-            }
-        } else {
-            event.isCancelled = true
-            val remainder = raw.removePrefix(entry.alias).trim()
-            SpecializedCommandExecutor.executeAll(
-                host,
-                expanded,
-                null,
-                mapOf("args" to remainder, "player" to event.sender.name),
-            )
-        }
+        handlePreprocess(
+            rawInput = event.command,
+            sender = event.sender,
+            player = null,
+            cancel = { event.isCancelled = true },
+            rewriteCommand = { targetCmd -> event.command = targetCmd },
+        )
     }
 
     @EventHandler(priority = EventPriority.NORMAL, ignoreCancelled = true)
     fun onRemoteServerCommand(event: RemoteServerCommandEvent) {
-        val raw = normalizeCommandInput(event.command) ?: return
+        handlePreprocess(
+            rawInput = event.command,
+            sender = event.sender,
+            player = null,
+            cancel = { event.isCancelled = true },
+            rewriteCommand = { targetCmd -> event.command = targetCmd },
+        )
+    }
+
+    private inline fun handlePreprocess(
+        rawInput: String,
+        sender: CommandSender,
+        player: Player?,
+        cancel: () -> Unit,
+        rewriteCommand: (String) -> Unit,
+    ) {
+        val raw = normalizeCommandInput(rawInput) ?: return
+
         val disabledSub = extractDisabledBaseSubcommand(raw)
         if (disabledSub != null) {
-            event.isCancelled = true
-            host.messages.send(event.sender, "command-disabled", mapOf("command" to disabledSub))
+            cancel()
+            host.messages.send(sender, "command-disabled", mapOf("command" to disabledSub))
             return
         }
 
         val entry = AliasMatcher.findBestMatch(raw, combinedAliases) ?: return
         if (!entry.enabled) return
 
-        val expanded = AliasMatcher.expandCommands(entry, raw, event.sender.name)
+        if (player != null &&
+            entry.type == CommandAliasType.CUSTOM &&
+            entry.requiresPerm &&
+            !player.hasPermission("${host.customAliasPermissionPrefix}${entry.permissionKey}") &&
+            !player.hasPermission(host.adminPermission)
+        ) {
+            cancel()
+            host.messages.send(player, "no-permission")
+            return
+        }
+
+        val expanded = AliasMatcher.expandCommands(entry, raw, sender.name)
         if (expanded.isEmpty()) return
 
         if (!AliasMatcher.isSpecializedAlias(expanded)) {
             val targetCmd = expanded.first().removePrefix("/").trim()
             if (targetCmd.isNotEmpty()) {
-                event.command = targetCmd
+                rewriteCommand(targetCmd)
             }
         } else {
-            event.isCancelled = true
-            val remainder = raw.removePrefix(entry.alias).trim()
+            cancel()
+            val remainder = AliasMatcher.extractRemainder(entry, raw)
             SpecializedCommandExecutor.executeAll(
                 host,
                 expanded,
-                null,
-                mapOf("args" to remainder, "player" to event.sender.name),
+                player,
+                mapOf("args" to remainder, "player" to sender.name),
             )
         }
     }

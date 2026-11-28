@@ -28,6 +28,20 @@ class LocaleParityTest {
     }
 
     @Test
+    fun `messages_en and messages_ko have identical placeholders per key`() {
+        val resDir = Path.of("src/main/resources")
+        val en = YamlConfiguration.loadConfiguration(resDir.resolve("messages_en.yml").toFile())
+        val ko = YamlConfiguration.loadConfiguration(resDir.resolve("messages_ko.yml").toFile())
+        val placeholderRegex = Regex("\\{([a-zA-Z0-9_]+)}")
+
+        for (key in collectKeys(resDir.resolve("messages_en.yml"))) {
+            val enPlaceholders = placeholderRegex.findAll(en.getString(key).orEmpty()).map { it.groupValues[1] }.toSet()
+            val koPlaceholders = placeholderRegex.findAll(ko.getString(key).orEmpty()).map { it.groupValues[1] }.toSet()
+            assertEquals(enPlaceholders, koPlaceholders, "Placeholder mismatch for locale key '$key'")
+        }
+    }
+
+    @Test
     fun `core package does not import any feature modules`() {
         val coreDir = Path.of("src/main/kotlin/claims/core")
         val violations = mutableListOf<String>()

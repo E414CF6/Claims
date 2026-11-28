@@ -1,9 +1,12 @@
 package claims.modules.claim
 
 import org.bukkit.Location
-import java.util.UUID
+import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Ephemeral per-player session state for claim tool interactions, bypass mode, and HUD banners.
+ */
 data class ClaimPlayerSession(
     var shovelMode: ShovelMode = ShovelMode.BASIC,
     var pendingCorner1: Location? = null,
@@ -14,6 +17,7 @@ data class ClaimPlayerSession(
     var lastClaimId: Long? = null,
 )
 
+/** Thread-safe in-memory store for active [ClaimPlayerSession] instances. */
 class ClaimSessionStore {
     private val sessions = ConcurrentHashMap<UUID, ClaimPlayerSession>()
 

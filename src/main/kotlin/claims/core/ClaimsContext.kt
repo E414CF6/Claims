@@ -13,14 +13,22 @@ import claims.core.ui.DialogKit
 import org.bukkit.plugin.java.JavaPlugin
 import java.io.File
 
+/**
+ * Composition root wiring shared core infrastructure services (configuration, localization,
+ * Folia-safe scheduler, SQLite connection pool, ActionBar/BossBar HUDs, Dialog/Menu facade,
+ * module registry, and dynamic command aliases) for the [Claims][claims.Claims] plugin.
+ */
 class ClaimsContext(override val plugin: JavaPlugin) : CoreHost {
 
+    /** Live plugin configuration snapshot; updated atomically on [reloadAll]. */
     @Volatile
     var config: ClaimsConfig = ClaimsConfig.load(plugin)
         private set
 
     override val messages = MessageService(plugin).apply { reload(config.language) }
     override val scheduler = PluginScheduler(plugin)
+
+    /** Shared SQLite + HikariCP connection pool for feature repositories. */
     val database =
         DatabaseManager(File(plugin.dataFolder, config.databaseFile), config.databasePoolSize, "Claims-SQLite")
 
@@ -47,6 +55,10 @@ class ClaimsContext(override val plugin: JavaPlugin) : CoreHost {
 
     val commandAliases = CommandAliasService(this)
 
+    /**
+     * Reloads `config.yml`, locale YAML files, ActionBar task cadence, active modules,
+     * and dynamic command aliases without requiring a server restart.
+     */
     override fun reloadAll() {
         config = ClaimsConfig.load(plugin)
         messages.reload(config.language)
@@ -55,6 +67,10 @@ class ClaimsContext(override val plugin: JavaPlugin) : CoreHost {
         commandAliases.reload()
     }
 
+    /**
+     * Gracefully shuts down aliases, modules, UI bars, scheduled tasks, and the database pool
+     * in reverse dependency order.
+     */
     fun shutdown() {
         commandAliases.shutdown()
         modules.disableAll()

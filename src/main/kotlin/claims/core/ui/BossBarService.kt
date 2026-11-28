@@ -5,15 +5,19 @@ import net.kyori.adventure.bossbar.BossBar
 import net.kyori.adventure.text.Component
 import org.bukkit.Bukkit
 import org.bukkit.entity.Player
-import java.util.UUID
+import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Per-player keyed BossBar manager for mode prompts, territory banners, and timed notifications.
+ */
 class BossBarService(
     private val scheduler: PluginScheduler,
     private val enabledProvider: () -> Boolean,
 ) {
     private val playerBars = ConcurrentHashMap<UUID, ConcurrentHashMap<String, BossBar>>()
 
+    /** Creates or updates a player's BossBar identified by [key]. */
     fun showOrUpdate(
         player: Player,
         key: String,
@@ -38,6 +42,7 @@ class BossBarService(
         }
     }
 
+    /** Displays a full-progress BossBar for [delayTicks] and automatically hides it afterward. */
     fun completeAndAutoHide(
         player: Player,
         key: String,
@@ -52,12 +57,14 @@ class BossBarService(
         }
     }
 
+    /** Hides the BossBar identified by [key] for [player], if visible. */
     fun hide(player: Player, key: String) {
         val bars = playerBars[player.uniqueId] ?: return
         val bar = bars.remove(key) ?: return
         runCatching { player.hideBossBar(bar) }
     }
 
+    /** Hides and forgets all BossBars tracked for [player] (typically on quit). */
     fun hideAll(player: Player) {
         val bars = playerBars.remove(player.uniqueId) ?: return
         for (bar in bars.values) {
@@ -65,6 +72,7 @@ class BossBarService(
         }
     }
 
+    /** Hides all active BossBars across all online players (typically on plugin disable). */
     fun clearAll() {
         for ((uuid, bars) in playerBars) {
             val player = Bukkit.getPlayer(uuid) ?: continue

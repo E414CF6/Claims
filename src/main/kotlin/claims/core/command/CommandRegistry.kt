@@ -1,7 +1,7 @@
 package claims.core.command
 
 import org.bukkit.command.CommandSender
-import java.util.Locale
+import java.util.*
 
 fun interface SubcommandExecutor {
     fun execute(sender: CommandSender, args: Array<out String>): Boolean

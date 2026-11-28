@@ -10,6 +10,7 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
+/** Outcome of a claim creation, subclaim creation, or resize operation. */
 sealed interface ClaimResult {
     data class Success(val claim: Claim, val refundedBlocks: Int = 0) : ClaimResult
     data class Failure(val reason: Reason, val needed: Int = 0, val available: Int = 0) : ClaimResult
@@ -19,6 +20,12 @@ sealed interface ClaimResult {
     }
 }
 
+/**
+ * Core spatial index, economy manager, and lifecycle coordinator for claims and subclaims.
+ *
+ * Top-level claims are indexed in [topLevelByChunk] by `(worldName, chunkX, chunkZ)` for
+ * $O(1)$ lookup on hot protection events, while SQLite mutations are delegated to [repository].
+ */
 class ClaimManager(
     private val scheduler: PluginScheduler?,
     private val repository: ClaimRepository,
@@ -32,8 +39,10 @@ class ClaimManager(
     private val dirtyPlayers = ConcurrentHashMap.newKeySet<UUID>()
     private val lastAfkPositions = ConcurrentHashMap<UUID, Location>()
     private var accrualTask: TaskHandle? = null
+    private var flushTask: TaskHandle? = null
     private var cleanupTask: TaskHandle? = null
 
+    /** Loads all claims, subclaims, trusts, flags, and player balances from SQLite into memory. */
     fun loadAll() {
         claimsById.clear()
         topLevelByChunk.clear()
@@ -49,6 +58,12 @@ class ClaimManager(
         playerDataMap.putAll(repository.loadAllPlayerData())
     }
 
+    /**
+     * Starts periodic playtime accrual (every 5 minutes) and, if enabled, inactive-claim cleanup.
+     *
+     * On Folia, player locations are read via [PluginScheduler.runForEntity] so each check runs on
+     * the player's owning region thread.
+     */
     fun startAccrualTask() {
         val sched = scheduler ?: return
         stopAccrualTask()
@@ -57,18 +72,25 @@ class ClaimManager(
             if (cfg.accrualBlocksPerHour <= 0) return@runGlobalTimer
             val increment = maxOf(1, cfg.accrualBlocksPerHour / 12)
             for (player in Bukkit.getOnlinePlayers()) {
-                val loc = player.location
-                val prev = lastAfkPositions.put(player.uniqueId, loc.clone())
-                val moved = prev == null || prev.world?.name != loc.world?.name || prev.distanceSquared(loc) >= 9.0
-                if (moved) {
-                    val data = getOrCreatePlayerData(player.uniqueId)
-                    if (data.accruedBlocks < cfg.maxAccruedBlocks) {
-                        data.accruedBlocks = (data.accruedBlocks + increment).coerceAtMost(cfg.maxAccruedBlocks)
+                sched.runForEntity(player) {
+                    if (!player.isOnline) return@runForEntity
+                    val loc = player.location
+                    val prev = lastAfkPositions.put(player.uniqueId, loc.clone())
+                    val moved = prev == null || prev.world?.name != loc.world?.name || prev.distanceSquared(loc) >= 9.0
+                    if (moved) {
+                        val data = getOrCreatePlayerData(player.uniqueId)
                         data.lastActiveAt = System.currentTimeMillis()
+                        if (data.accruedBlocks < cfg.maxAccruedBlocks) {
+                            data.accruedBlocks = (data.accruedBlocks + increment).coerceAtMost(cfg.maxAccruedBlocks)
+                        }
                         dirtyPlayers.add(player.uniqueId)
                     }
                 }
             }
+        }
+
+        // Flush dirty balances asynchronously shortly after each accrual cycle.
+        flushTask = sched.runGlobalTimer(6200L, 6000L) {
             sched.runAsync { flushDirtyPlayerData() }
         }
 
@@ -80,12 +102,27 @@ class ClaimManager(
         }
     }
 
+    /** Stops background accrual/cleanup timers and flushes any pending player data to SQLite. */
     fun stopAccrualTask() {
         accrualTask?.cancel()
         accrualTask = null
+        flushTask?.cancel()
+        flushTask = null
         cleanupTask?.cancel()
         cleanupTask = null
         flushDirtyPlayerData()
+    }
+
+    /** Clears ephemeral AFK tracking state for a disconnecting player. */
+    fun clearTracking(uuid: UUID) {
+        lastAfkPositions.remove(uuid)
+    }
+
+    /** Marks [uuid] as recently active so inactive-claim cleanup will not expire their claims. */
+    fun touchPlayerActivity(uuid: UUID) {
+        val data = getOrCreatePlayerData(uuid)
+        data.lastActiveAt = System.currentTimeMillis()
+        dirtyPlayers.add(uuid)
     }
 
     fun flushDirtyPlayerData() {
@@ -108,8 +145,13 @@ class ClaimManager(
         created
     }
 
+    /** Returns total 2D block area consumed across all top-level claims owned by [uuid]. */
     fun getUsedClaimBlocks(uuid: UUID): Int =
-        claimsById.values.asSequence().filter { !it.isSubclaim && it.ownerId == uuid }.sumOf { it.bounds.area }
+        claimsById.values.asSequence()
+            .filter { !it.isSubclaim && it.ownerId == uuid }
+            .sumOf { it.bounds.area.toLong() }
+            .coerceAtMost(Int.MAX_VALUE.toLong())
+            .toInt()
 
     fun getAvailableClaimBlocks(uuid: UUID): Int {
         val cfg = configProvider()
@@ -130,6 +172,10 @@ class ClaimManager(
         repository.savePlayerData(data)
     }
 
+    /**
+     * Extends (positive [amount]) or shrinks (negative [amount]) [claim] along [facing].
+     * Rejects shrinks that would invert past the opposite edge instead of flipping across space.
+     */
     fun extendClaimInDirection(
         claim: Claim, facing: BlockFace, amount: Int, isAdminBypass: Boolean = false
     ): ClaimResult {
@@ -141,22 +187,22 @@ class ClaimManager(
             BlockFace.EAST -> b.copy(maxX = b.maxX + amount)
             else -> return ClaimResult.Failure(ClaimResult.Reason.TOO_SMALL)
         }
-        val normalized = BoundingBox.ofCorners(
-            newBounds.worldName,
-            newBounds.minX,
-            newBounds.minY,
-            newBounds.minZ,
-            newBounds.maxX,
-            newBounds.maxY,
-            newBounds.maxZ
-        )
-        return resizeClaim(claim, normalized, isAdminBypass)
+        if (newBounds.minX > newBounds.maxX || newBounds.minZ > newBounds.maxZ) {
+            return ClaimResult.Failure(ClaimResult.Reason.TOO_SMALL)
+        }
+        return resizeClaim(claim, newBounds, isAdminBypass)
     }
 
     fun transferClaim(claim: Claim, newOwnerId: UUID?) {
         claim.ownerId = newOwnerId
+        if (newOwnerId != null) {
+            removeTrust(claim, newOwnerId.toString())
+        }
         for (child in claim.children) {
             child.ownerId = newOwnerId
+            if (newOwnerId != null) {
+                removeTrust(child, newOwnerId.toString())
+            }
             repository.updateClaimMetadata(child)
         }
         repository.updateClaimMetadata(claim)
@@ -296,8 +342,15 @@ class ClaimManager(
         return ClaimResult.Success(sub)
     }
 
+    /**
+     * Resizes a top-level claim or subclaim to [newBounds], validating minimum dimensions,
+     * world consistency, overlap with sibling/foreign claims, child containment, and block balance.
+     */
     fun resizeClaim(claim: Claim, newBounds: BoundingBox, isAdminBypass: Boolean = false): ClaimResult {
         val cfg = configProvider()
+        if (newBounds.worldName != claim.bounds.worldName) {
+            return ClaimResult.Failure(ClaimResult.Reason.WORLD_DISABLED)
+        }
         if (claim.isSubclaim) {
             val parent = claim.parent ?: return ClaimResult.Failure(ClaimResult.Reason.OUTSIDE_PARENT)
             if (!parent.bounds.contains2D(newBounds)) {
@@ -337,10 +390,17 @@ class ClaimManager(
         return ClaimResult.Success(claim)
     }
 
+    /**
+     * Deletes [claim] (and its child subclaims if top-level) from memory and SQLite.
+     *
+     * When `abandon-refund-ratio < 1.0`, the non-refunded block penalty `(area - refund)` is
+     * deducted from the owner's accrued/bonus pool so available claim blocks reflect the ratio.
+     */
     fun deleteClaim(claim: Claim): Int {
         val cfg = configProvider()
+        val area = claim.bounds.area
         val refund = if (!claim.isSubclaim && !claim.isAdminClaim) {
-            (claim.bounds.area * cfg.abandonRefundRatio).toInt()
+            (area * cfg.abandonRefundRatio).toInt().coerceIn(0, area)
         } else 0
 
         if (claim.isSubclaim) {
@@ -353,6 +413,19 @@ class ClaimManager(
         }
         claimsById.remove(claim.id)
         repository.deleteClaim(claim.id)
+
+        val owner = claim.ownerId
+        val penalty = area - refund
+        if (owner != null && !claim.isSubclaim && penalty > 0) {
+            val data = getOrCreatePlayerData(owner)
+            val fromAccrued = minOf(data.accruedBlocks, penalty)
+            data.accruedBlocks -= fromAccrued
+            val remainingPenalty = penalty - fromAccrued
+            if (remainingPenalty > 0) {
+                data.bonusBlocks = (data.bonusBlocks - remainingPenalty).coerceAtLeast(0)
+            }
+            repository.savePlayerData(data)
+        }
         return refund
     }
 
@@ -364,6 +437,12 @@ class ClaimManager(
     fun removeTrust(claim: Claim, targetKey: String) {
         claim.trusts.remove(targetKey)
         repository.removeTrust(claim.id, targetKey)
+    }
+
+    /** Revokes all direct and public trust entries on [claim]. */
+    fun removeAllTrusts(claim: Claim) {
+        claim.trusts.clear()
+        repository.deleteAllTrusts(claim.id)
     }
 
     fun setFlag(claim: Claim, flag: ClaimFlag, value: Boolean) {

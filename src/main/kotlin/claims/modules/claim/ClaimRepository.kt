@@ -2,8 +2,12 @@ package claims.modules.claim
 
 import claims.core.storage.DatabaseManager
 import java.sql.Statement
-import java.util.UUID
+import java.util.*
 
+/**
+ * SQLite persistence repository for claims (`cl_claims`), trusts (`cl_claim_trusts`),
+ * flags (`cl_claim_flags`), and player claim block balances (`cl_player_claim_data`).
+ */
 class ClaimRepository(private val db: DatabaseManager) {
 
     init {
@@ -261,6 +265,14 @@ class ClaimRepository(private val db: DatabaseManager) {
         conn.prepareStatement("DELETE FROM cl_claim_trusts WHERE claim_id = ? AND target_key = ?").use { ps ->
             ps.setLong(1, claimId)
             ps.setString(2, targetKey)
+            ps.executeUpdate()
+        }
+    }
+
+    /** Removes all trust entries associated with [claimId]. */
+    fun deleteAllTrusts(claimId: Long) = db.withConnection { conn ->
+        conn.prepareStatement("DELETE FROM cl_claim_trusts WHERE claim_id = ?").use { ps ->
+            ps.setLong(1, claimId)
             ps.executeUpdate()
         }
     }

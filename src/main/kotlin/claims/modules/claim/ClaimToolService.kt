@@ -9,6 +9,10 @@ import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.entity.Player
 
+/**
+ * Handles interactive claim-tool (`GOLDEN_SHOVEL`) corner selection, resizing, subdivision,
+ * and inspection-stick (`STICK`) queries with BossBar/ActionBar feedback and boundary visualization.
+ */
 class ClaimToolService(
     private val configProvider: () -> ClaimsConfig,
     private val messages: MessageService,
@@ -22,13 +26,20 @@ class ClaimToolService(
         private const val MODE_BAR_KEY = "claim_mode"
     }
 
+    /** Inspects the claim at [target] or highlights the nearest claim within 24 blocks. */
     fun handleInspectStick(player: Player, target: Location) {
+        val cfg = configProvider()
+        val worldName = target.world?.name ?: return
+        if (!cfg.isWorldEnabled(worldName)) {
+            messages.send(player, "world-disabled")
+            return
+        }
         val claim = claimManager.getClaimAt(target)
         if (claim == null) {
             actionBar.flash(player, messages.render("wilderness"))
             val nearby = claimManager.getClaimsOverlapping(
                 BoundingBox.ofCorners(
-                    target.world.name,
+                    worldName,
                     target.blockX - 24,
                     target.blockY,
                     target.blockZ - 24,
@@ -39,14 +50,13 @@ class ClaimToolService(
             )
             if (nearby.isNotEmpty()) {
                 visualizer.showClaim(player, nearby.first(), Material.DIAMOND_BLOCK)
-                messages.sendRaw(
+                messages.send(
                     player,
-                    "<gray>Highlighted nearby claim (${nearby.first().name}, Owner: ${
-                        nearby.first().ownerName()
-                    }).</gray>"
+                    "claim-nearby-highlighted",
+                    mapOf("name" to nearby.first().name, "owner" to nearby.first().ownerName())
                 )
             } else {
-                messages.sendRaw(player, "<gray>No claims found nearby.</gray>")
+                messages.send(player, "claim-none-nearby")
             }
             return
         }
@@ -54,36 +64,59 @@ class ClaimToolService(
         visualizer.showClaim(player, claim)
         val perm = claim.effectivePermission(player.uniqueId)
         val permLabel = perm?.displayName ?: "None"
-        messages.sendRaw(
+        messages.send(
             player,
-            "<aqua>[${claim.name}]</aqua> <gray>Owner:</gray> <white>${claim.ownerName()}</white> " +
-                    "<gray>| Size:</gray> <white>${claim.bounds.width}×${claim.bounds.length} (${claim.bounds.area} blocks)</white> " +
-                    "<gray>| Your Trust:</gray> <green>$permLabel</green>"
+            "claim-inspect",
+            mapOf(
+                "name" to claim.name,
+                "owner" to claim.ownerName(),
+                "w" to claim.bounds.width,
+                "l" to claim.bounds.length,
+                "area" to claim.bounds.area,
+                "trust" to permLabel,
+            )
         )
     }
 
+    /** Processes right-click corner selection for creating, resizing, or subdividing claims. */
     fun handleShovelRightClick(player: Player, clicked: Location) {
         val cfg = configProvider()
+        val worldName = clicked.world?.name ?: return
+        if (!cfg.isWorldEnabled(worldName)) {
+            cancelSelection(player)
+            messages.send(player, "world-disabled")
+            return
+        }
         val state = sessions.state(player.uniqueId)
         val adminBypass = state.adminBypass && player.hasPermission("claims.admin")
         val existingAtClick = claimManager.getClaimAt(clicked)
 
         val corner1 = state.pendingCorner1
-        if (corner1 != null && corner1.world?.name == clicked.world.name) {
+        if (corner1 != null && corner1.world?.name == worldName) {
             state.pendingCorner1 = null
             bossBar.hide(player, MODE_BAR_KEY)
 
             val resizing = state.resizingClaim
             if (resizing != null) {
                 state.resizingClaim = null
-                finishResize(player, resizing, corner1, clicked, adminBypass)
+                val liveClaim = claimManager.getClaimById(resizing.id)
+                if (liveClaim == null) {
+                    messages.send(player, "not-in-claim")
+                    return
+                }
+                finishResize(player, liveClaim, corner1, clicked, adminBypass)
                 return
             }
 
             val subdivParent = state.subdividingParent
             if (subdivParent != null) {
                 state.subdividingParent = null
-                finishSubclaim(player, subdivParent, corner1, clicked)
+                val liveParent = claimManager.getClaimById(subdivParent.id)
+                if (liveParent == null) {
+                    messages.send(player, "not-in-claim")
+                    return
+                }
+                finishSubclaim(player, liveParent, corner1, clicked)
                 return
             }
 
@@ -104,7 +137,7 @@ class ClaimToolService(
                     bossBar.showOrUpdate(
                         player,
                         MODE_BAR_KEY,
-                        messages.renderRaw("<aqua>📐 Resizing claim — Right-click the new corner position</aqua>"),
+                        messages.render("bossbar-resizing"),
                         1.0f,
                         BossBar.Color.YELLOW
                     )
@@ -114,7 +147,7 @@ class ClaimToolService(
         }
 
         if (state.shovelMode == ShovelMode.SUBDIVIDE) {
-            val top = claimManager.getTopLevelClaimAt(clicked.world.name, clicked.blockX, clicked.blockZ)
+            val top = claimManager.getTopLevelClaimAt(worldName, clicked.blockX, clicked.blockZ)
             if (top == null) {
                 messages.send(player, "not-in-claim")
                 return
@@ -130,7 +163,7 @@ class ClaimToolService(
                 bossBar.showOrUpdate(
                     player,
                     MODE_BAR_KEY,
-                    messages.renderRaw("<light_purple>⊞ Creating subclaim — Right-click the opposite corner</light_purple>"),
+                    messages.render("bossbar-subdividing"),
                     1.0f,
                     BossBar.Color.PURPLE
                 )
@@ -148,7 +181,7 @@ class ClaimToolService(
         visualizer.showBounds(
             player,
             BoundingBox.ofCorners(
-                clicked.world.name,
+                worldName,
                 clicked.blockX,
                 clicked.blockY,
                 clicked.blockZ,
@@ -163,19 +196,15 @@ class ClaimToolService(
             bossBar.showOrUpdate(
                 player,
                 MODE_BAR_KEY,
-                messages.renderRaw("<aqua>📐 Creating new claim — Right-click the diagonal opposite corner</aqua>"),
+                messages.render("bossbar-creating"),
                 1.0f,
                 BossBar.Color.BLUE
             )
         }
         actionBar.tickPlayer(player)
-        if (!cfg.isWorldEnabled(clicked.world.name)) {
-            state.pendingCorner1 = null
-            bossBar.hide(player, MODE_BAR_KEY)
-            messages.sendRaw(player, "<red>Claims are disabled in this world.</red>")
-        }
     }
 
+    /** Clears any pending corner/resize/subdivision state and hides active visualization & mode BossBar. */
     fun cancelSelection(player: Player) {
         val state = sessions.state(player.uniqueId)
         state.pendingCorner1 = null
@@ -236,11 +265,16 @@ class ClaimToolService(
     ) {
         val b = claim.bounds
         val newMinX = if (oldCorner.blockX == b.minX) newCorner.blockX else b.minX
-        val newMaxX = if (oldCorner.blockX == b.maxX) newCorner.blockX else b.maxX
+        val newMaxX = if (oldCorner.blockX == b.maxX && oldCorner.blockX != b.minX) newCorner.blockX else b.maxX
         val newMinZ = if (oldCorner.blockZ == b.minZ) newCorner.blockZ else b.minZ
-        val newMaxZ = if (oldCorner.blockZ == b.maxZ) newCorner.blockZ else b.maxZ
+        val newMaxZ = if (oldCorner.blockZ == b.maxZ && oldCorner.blockZ != b.minZ) newCorner.blockZ else b.maxZ
 
-        val newBounds = BoundingBox.ofCorners(
+        if (newMinX > newMaxX || newMinZ > newMaxZ) {
+            reportFailure(player, ClaimResult.Failure(ClaimResult.Reason.TOO_SMALL))
+            return
+        }
+
+        val newBounds = BoundingBox(
             b.worldName, newMinX, b.minY, newMinZ, newMaxX, b.maxY, newMaxZ
         )
         when (val result = claimManager.resizeClaim(claim, newBounds, isAdminBypass = adminBypass)) {
@@ -273,14 +307,9 @@ class ClaimToolService(
                 player, "claim-insufficient-blocks", mapOf("needed" to failure.needed, "available" to failure.available)
             )
 
-            ClaimResult.Reason.OUTSIDE_PARENT -> messages.sendRaw(
-                player, "<red>Subclaim cannot extend outside its parent claim.</red>"
-            )
-
+            ClaimResult.Reason.OUTSIDE_PARENT -> messages.send(player, "outside-parent")
             ClaimResult.Reason.NOT_OWNER -> messages.send(player, "deny-manage", mapOf("owner" to "-"))
-            ClaimResult.Reason.WORLD_DISABLED -> messages.sendRaw(
-                player, "<red>Claims are disabled in this world.</red>"
-            )
+            ClaimResult.Reason.WORLD_DISABLED -> messages.send(player, "world-disabled")
         }
     }
 

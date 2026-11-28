@@ -6,7 +6,7 @@ import org.bukkit.command.CommandExecutor
 import org.bukkit.command.CommandSender
 import org.bukkit.command.TabCompleter
 import org.bukkit.entity.Player
-import java.util.Locale
+import java.util.*
 
 /**
  * Reusable root command executor routing subcommands via [CommandRegistry] and honoring
@@ -21,10 +21,35 @@ class RootCommandExecutor(
     private val statusReporter: (CommandSender) -> Unit,
 ) : CommandExecutor, TabCompleter {
 
+    /** Registers core administrative and navigation subcommands (`help`, `menu`, `admin`, `status`, `aliases`, `alias`, `reload`). */
     fun registerCoreSubcommands() {
         val reg = host.commandRegistry
         val root = host.rootCommandName
         val short = host.rootAliases.firstOrNull() ?: root
+
+        reg.registerSubcommand(
+            name = "help",
+            description = "Show available /$root subcommands",
+            permission = userPermission,
+            aliases = listOf("?"),
+            standaloneByDefault = false,
+        ) { sender, _ ->
+            val visible = host.commandRegistry.allSubcommands()
+                .filter { !commandAliases.isBaseDisabled(it.name) }
+                .filter { it.permission == null || sender.hasPermission(it.permission) }
+            host.messages.sendRaw(
+                sender,
+                "<gradient:#38bdf8:#818cf8><bold>${host.pluginDisplayName} Commands</bold></gradient> <gray>(/$short):</gray>"
+            )
+            for (sub in visible) {
+                host.messages.sendRaw(
+                    sender,
+                    "<aqua>/$short ${sub.name}</aqua> <dark_gray>-</dark_gray> <gray>${sub.description}</gray>",
+                    withPrefix = false,
+                )
+            }
+            true
+        }
 
         reg.registerSubcommand(
             name = "menu",
@@ -168,6 +193,10 @@ class RootCommandExecutor(
 
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (args.isEmpty()) {
+            if (!sender.hasPermission(userPermission)) {
+                host.messages.send(sender, "no-permission")
+                return true
+            }
             val player = sender as? Player ?: run {
                 host.messages.send(sender, "player-only")
                 return true
@@ -180,10 +209,13 @@ class RootCommandExecutor(
         val sub = host.commandRegistry.getSubcommand(subKey)
         if (sub == null) {
             val short = host.rootAliases.firstOrNull() ?: host.rootCommandName
-            val available = host.commandRegistry.allSubcommands().joinToString(", ") { it.name }
+            val available = host.commandRegistry.allSubcommands()
+                .filter { !commandAliases.isBaseDisabled(it.name) }
+                .filter { it.permission == null || sender.hasPermission(it.permission) }
+                .joinToString(", ") { it.name }
             host.messages.sendRaw(
                 sender,
-                "<aqua>/$short</aqua> <gray>(Dashboard GUI) |</gray> <white>$available</white>"
+                "<aqua>/$short</aqua> <gray>(Dashboard) |</gray> <white>$available</white>"
             )
             return true
         }

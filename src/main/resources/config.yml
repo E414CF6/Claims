@@ -1,50 +1,124 @@
-# Claims Configuration
+# ==============================================================================
+# Claims Plugin Configuration
+# ==============================================================================
+# Preventive land protection, hierarchical trust matrix, and territory guards
+# for Paper (1.20.4 - 26.3+) and Folia.
+#
+# Reload changes in-game with: /claims reload (requires claims.admin)
+# ==============================================================================
+
+# Locale used for player messages and HUD text.
+# Bundled options: "en" (messages_en.yml), "ko" (messages_ko.yml).
+# Missing keys automatically fall back to messages_en.yml.
 language: en
 
+# Dynamic command alias registration (managed alongside command-aliases.yml & aliases.yml).
 command-aliases:
+  # When true, subcommands marked `enabled: true` in command-aliases.yml are
+  # registered directly as top-level commands (e.g., /claim, /trust, /abandon).
+  # Set to false to keep only /claims (and /cl) plus custom aliases in aliases.yml.
   register-standalone-aliases: true
 
+# Feature module toggles.
+# Disabling a module prevents its listeners, tasks, and subcommands from loading.
 modules:
   claim:
     enabled: true
 
+# SQLite storage and HikariCP connection pool settings.
 database:
+  # Database filename inside plugins/Claims/.
   file: claims.db
+  # Maximum SQLite connection pool size (minimum 1; 2-4 is recommended with WAL mode).
   pool-size: 4
 
+# Core land claim economy, sizing, tools, and protection defaults.
 claims:
-  enabled-worlds: [ ] # Empty means enabled in all worlds
+  # List of world names where claiming and claim protection are active.
+  # Leave empty ([ ]) to enable Claims in all worlds.
+  enabled-worlds: [ ]
+
+  # Bukkit Material used to create, resize, and subdivide claims via right-click.
   claim-tool: GOLDEN_SHOVEL
+
+  # Bukkit Material used to inspect claims and highlight nearby borders via right-click.
   inspect-tool: STICK
+
+  # Claim blocks granted to every new player on first record creation.
   initial-claim-blocks: 400
+
+  # Claim blocks accrued per hour of active online play (requires movement; AFK excluded).
+  # Set to 0 to disable automatic playtime accrual.
   accrual-blocks-per-hour: 120
+
+  # Maximum claim blocks a player can accumulate through playtime accrual.
+  # Admin-granted bonus blocks (/claims adjustblocks) are added on top of this cap.
   max-accrued-blocks: 80000
+
+  # Minimum width/length (in blocks) for top-level player claims (unless admin-bypassing).
   min-claim-width: 5
+
+  # Minimum total X*Z area (in blocks) for top-level player claims (unless admin-bypassing).
   min-claim-area: 25
+
+  # Default half-width radius used by `/claims claim` when no radius argument is passed.
+  # Produces a (2 * radius + 1) x (2 * radius + 1) square centered on the player.
   auto-claim-radius: 7
+
+  # Fraction of a claim's area refunded to available blocks upon `/claims abandon` (0.0 - 1.0).
+  # Values below 1.0 deduct the unrefunded penalty from the owner's accrued/bonus pool.
   abandon-refund-ratio: 1.0
+
+  # Duration (in seconds) that temporary client-side claim boundary blocks remain visible.
   visualization-duration-seconds: 30
+
+  # When true, saplings/trees growing across a claim border are pruned unless the placer
+  # has BUILD permission in the neighboring claim.
   limit-tree-growth: true
+
+  # When true, portals generated without a player cause cannot form blocks inside claims.
   prevent-non-player-portals: true
+
+  # Optional automatic expiration of small claims owned by long-inactive players.
   unused-cleanup:
+    # Enable periodic inactive claim cleanup (runs every 30 minutes).
     enabled: false
+    # Days of player inactivity before eligible claims expire.
     inactive-days: 60
+    # Maximum claim area (X*Z) eligible for automatic cleanup; larger claims are preserved.
     max-area-to-expire: 2500
+
+  # Default per-claim protection flags applied to newly created top-level claims.
+  # Individual claim owners/managers can override these via `/claims settings`.
   default-flags:
+    # Allow player-vs-player combat (melee, projectiles, harmful splash potions) inside claims.
     pvp: false
+    # Allow TNT, creepers, beds, and respawn anchors to break blocks or harm passive entities.
     explosions: false
+    # Allow fire ignition/spread and block burning inside claims.
     fire-spread: false
+    # Allow non-player mobs (endermen, withers, ravagers, etc.) to alter blocks inside claims.
     mob-griefing: false
+    # Grant ACCESS trust (doors, buttons, levers, pressure plates) to all players by default.
     public-access: false
+    # Allow pistons outside the claim to push/pull blocks across this claim's border.
     piston-cross-border: false
+    # Show claim entry greeting messages when a player enters the claim.
     entry-notify: true
 
+# Player HUD settings (ActionBar and BossBar).
 ui:
   actionbar:
+    # Enable persistent territory / claim-tool ActionBar HUD and denial notifications.
     enabled: true
+    # Refresh interval in server ticks (20 ticks = 1 second; minimum 2).
     refresh-ticks: 10
+    # Minimum cooldown (in milliseconds) between repeated denial ActionBar alerts per player.
     denial-cooldown-ms: 1500
   bossbar:
+    # Master toggle for all BossBar indicators (claim tool mode & territory banners).
     enabled: true
+    # Show a BossBar instruction banner while creating, resizing, or subdividing with the claim tool.
     show-mode-banner: true
+    # Show a persistent BossBar territory banner by default (players can still toggle per-session in GUI).
     show-territory-banner: false

@@ -7,8 +7,18 @@ import org.bukkit.NamespacedKey
 import org.bukkit.Registry
 import org.bukkit.entity.Player
 
+/**
+ * Executes multi-line and prefixed custom alias scripts from `aliases.yml`.
+ *
+ * Supported line prefixes:
+ * - `console:`, `player:`, `op:` — dispatch a command as console, player, or temporary op
+ * - `msg:` / `message:`, `broadcast:` / `bc:`, `actionbar:`, `bossbar:` — MiniMessage output
+ * - `sound:` — play a Minecraft sound (`sound: entity.experience_orb.pickup 1.0 1.2`)
+ * - `delay:` / `delay!` — pause remaining lines by `<seconds>` (Folia entity/global-scheduler safe)
+ */
 object SpecializedCommandExecutor {
 
+    /** Executes [rawLines] sequentially starting from index 0 with [extraPlaceholders]. */
     fun executeAll(
         host: CoreHost,
         rawLines: List<String>,

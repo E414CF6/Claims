@@ -22,6 +22,7 @@ import org.bukkit.event.inventory.InventoryMoveItemEvent
 import org.bukkit.event.inventory.InventoryOpenEvent
 import org.bukkit.event.player.*
 import org.bukkit.event.vehicle.VehicleDamageEvent
+import org.bukkit.event.vehicle.VehicleEnterEvent
 import org.bukkit.event.world.PortalCreateEvent
 import org.bukkit.event.world.StructureGrowEvent
 import org.bukkit.inventory.BlockInventoryHolder
@@ -29,6 +30,11 @@ import org.bukkit.inventory.EquipmentSlot
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Enforces claim and subclaim protections across block, container, entity, explosion, fire,
+ * liquid, piston, portal, and tree-growth events while honoring per-claim [ClaimFlag]s and
+ * Folia-safe asynchronous teleports.
+ */
 class ProtectionListener(
     private val scheduler: PluginScheduler,
     private val configProvider: () -> ClaimsConfig,
@@ -43,13 +49,16 @@ class ProtectionListener(
 
     private val portalReturnLocations = ConcurrentHashMap<UUID, Location>()
 
+    private fun isWorldActive(worldName: String?): Boolean =
+        worldName != null && configProvider().isWorldEnabled(worldName)
+
     private fun isBypassing(player: Player): Boolean {
         val state = sessions.state(player.uniqueId)
         return state.adminBypass && player.hasPermission("claims.admin")
     }
 
     private fun checkPermission(player: Player, loc: Location, required: ClaimPermission): Boolean {
-        if (!configProvider().isWorldEnabled(loc.world?.name ?: return true)) return true
+        if (!isWorldActive(loc.world?.name)) return true
         val claim = claimManager.getClaimAt(loc) ?: return true
         if (claim.hasPermission(player.uniqueId, required, isBypassing(player))) {
             return true
@@ -118,7 +127,10 @@ class ProtectionListener(
         val block = event.clickedBlock ?: return
 
         if (event.action == Action.PHYSICAL) {
-            if (block.type == Material.FARMLAND) {
+            if (block.type == Material.FARMLAND ||
+                block.type == Material.TURTLE_EGG ||
+                block.type == Material.SNIFFER_EGG
+            ) {
                 if (!checkPermission(player, block.location, ClaimPermission.BUILD)) {
                     event.isCancelled = true
                 }
@@ -165,6 +177,7 @@ class ProtectionListener(
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onInventoryMoveItem(event: InventoryMoveItemEvent) {
         val srcLoc = (event.source.holder as? BlockInventoryHolder)?.block?.location ?: return
+        if (!isWorldActive(srcLoc.world?.name)) return
         val dstLoc = (event.destination.holder as? BlockInventoryHolder)?.block?.location ?: return
         val srcClaim = claimManager.getTopLevelClaimAt(srcLoc.world.name, srcLoc.blockX, srcLoc.blockZ) ?: return
         val dstClaim = claimManager.getTopLevelClaimAt(dstLoc.world.name, dstLoc.blockX, dstLoc.blockZ)
@@ -178,7 +191,7 @@ class ProtectionListener(
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onDispense(event: BlockDispenseEvent) {
         val fromBlock = event.block
-        if (!configProvider().isWorldEnabled(fromBlock.world.name)) return
+        if (!isWorldActive(fromBlock.world.name)) return
         val dispenser = fromBlock.blockData as? Dispenser ?: return
         val toBlock = fromBlock.getRelative(dispenser.facing)
         val fromClaim = claimManager.getTopLevelClaimAt(fromBlock.world.name, fromBlock.x, fromBlock.z)
@@ -200,10 +213,11 @@ class ProtectionListener(
             val targetClaim = claimManager.getTopLevelClaimAt(event.world.name, blockState.x, blockState.z)
             if (targetClaim == null || targetClaim.id == sourceClaim?.id) {
                 false
+            } else if (placer == null) {
+                val sameOwner = sourceClaim?.ownerId != null && sourceClaim.ownerId == targetClaim.ownerId
+                !sameOwner
             } else {
-                placer == null || !targetClaim.hasPermission(
-                    placer.uniqueId, ClaimPermission.BUILD, isBypassing(placer)
-                )
+                !targetClaim.hasPermission(placer.uniqueId, ClaimPermission.BUILD, isBypassing(placer))
             }
         }
     }
@@ -232,6 +246,7 @@ class ProtectionListener(
         val player = event.player
         val from = event.from.clone()
         val to = event.to
+        if (!isWorldActive(to.world?.name)) return
         val destClaim = claimManager.getClaimAt(to) ?: return
         if (destClaim.hasPermission(player.uniqueId, ClaimPermission.ACCESS, isBypassing(player))) return
 
@@ -246,7 +261,7 @@ class ProtectionListener(
                         player.uniqueId, ClaimPermission.ACCESS, isBypassing(player)
                     )
                 ) {
-                    player.teleport(returnLoc)
+                    player.teleportAsync(returnLoc)
                     messages.send(player, "portal-trap-rescued")
                 }
             }
@@ -256,20 +271,23 @@ class ProtectionListener(
     @EventHandler(priority = EventPriority.MONITOR)
     fun onPlayerJoin(event: PlayerJoinEvent) {
         val player = event.player
+        claimManager.touchPlayerActivity(player.uniqueId)
+        if (!isWorldActive(player.world.name)) return
         if (player.location.block.type == Material.NETHER_PORTAL) {
             val claim = claimManager.getClaimAt(player.location)
             if (claim != null && !claim.hasPermission(player.uniqueId, ClaimPermission.ACCESS, isBypassing(player))) {
                 val b = claim.bounds
-                val safeLoc = Location(
-                    player.world,
-                    (b.minX - 2) + 0.5,
-                    (player.world.getHighestBlockYAt(b.minX - 2, player.location.blockZ) + 1).toDouble(),
-                    player.location.z
-                )
+                val safeX = b.minX - 2
+                val safeZ = player.location.blockZ
+                val probeLoc = Location(player.world, safeX + 0.5, player.location.y, safeZ + 0.5)
                 scheduler.runForEntityDelayed(player, 80L) {
                     if (player.isOnline && player.location.block.type == Material.NETHER_PORTAL) {
-                        player.teleport(safeLoc)
-                        messages.send(player, "portal-trap-rescued")
+                        scheduler.runAtLocation(probeLoc) {
+                            val safeY = (player.world.getHighestBlockYAt(safeX, safeZ) + 1).toDouble()
+                            val safeLoc = Location(player.world, safeX + 0.5, safeY, safeZ + 0.5)
+                            player.teleportAsync(safeLoc)
+                            messages.send(player, "portal-trap-rescued")
+                        }
                     }
                 }
             }
@@ -302,6 +320,7 @@ class ProtectionListener(
         val cfg = configProvider()
         for (entity in event.affectedEntities) {
             if (entity is Monster) continue
+            if (!isWorldActive(entity.world.name)) continue
             val claim = claimManager.getClaimAt(entity.location) ?: continue
             if (entity is Player && entity.uniqueId != thrower.uniqueId) {
                 if (!claim.flag(ClaimFlag.PVP, cfg.defaultFlags) && !isBypassing(thrower)) {
@@ -317,6 +336,7 @@ class ProtectionListener(
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onEntityBlockForm(event: EntityBlockFormEvent) {
+        if (!isWorldActive(event.block.world.name)) return
         val entity = event.entity
         val claim = claimManager.getClaimAt(event.block.location) ?: return
         if (entity is Player) {
@@ -341,6 +361,20 @@ class ProtectionListener(
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    fun onBucketEntity(event: PlayerBucketEntityEvent) {
+        if (!checkPermission(event.player, event.entity.location, ClaimPermission.CONTAINER)) {
+            event.isCancelled = true
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    fun onShearEntity(event: PlayerShearEntityEvent) {
+        if (!checkPermission(event.player, event.entity.location, ClaimPermission.CONTAINER)) {
+            event.isCancelled = true
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onArmorStandManipulate(event: PlayerArmorStandManipulateEvent) {
         if (!checkPermission(event.player, event.rightClicked.location, ClaimPermission.CONTAINER)) {
             event.isCancelled = true
@@ -357,6 +391,7 @@ class ProtectionListener(
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onHangingBreak(event: HangingBreakByEntityEvent) {
+        if (!isWorldActive(event.entity.world.name)) return
         val claim = claimManager.getClaimAt(event.entity.location) ?: return
         val remover = resolvePlayerDamager(event.remover)
         if (remover != null) {
@@ -377,8 +412,17 @@ class ProtectionListener(
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    fun onVehicleEnter(event: VehicleEnterEvent) {
+        val player = event.entered as? Player ?: return
+        if (!checkPermission(player, event.vehicle.location, ClaimPermission.ACCESS)) {
+            event.isCancelled = true
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onEntityDamageByEntity(event: EntityDamageByEntityEvent) {
         val target = event.entity
+        if (!isWorldActive(target.world.name)) return
         val attacker = resolvePlayerDamager(event.damager)
         val cfg = configProvider()
 
@@ -395,15 +439,29 @@ class ProtectionListener(
             }
         }
 
-        if (attacker != null && target !is Monster && target !is Player) {
-            if (!checkPermission(attacker, target.location, ClaimPermission.CONTAINER)) {
-                event.isCancelled = true
+        if (target !is Monster && target !is Player) {
+            if (attacker != null) {
+                if (!checkPermission(attacker, target.location, ClaimPermission.CONTAINER)) {
+                    event.isCancelled = true
+                }
+                return
+            }
+            val isExplosion = event.cause == EntityDamageEvent.DamageCause.ENTITY_EXPLOSION ||
+                event.cause == EntityDamageEvent.DamageCause.BLOCK_EXPLOSION ||
+                event.damager is Explosive ||
+                event.damager is Creeper
+            if (isExplosion) {
+                val claim = claimManager.getClaimAt(target.location)
+                if (claim != null && !claim.flag(ClaimFlag.EXPLOSIONS, cfg.defaultFlags)) {
+                    event.isCancelled = true
+                }
             }
         }
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onEntityExplode(event: EntityExplodeEvent) {
+        if (!isWorldActive(event.location.world?.name)) return
         val defaults = configProvider().defaultFlags
         event.blockList().removeIf { block ->
             val claim = claimManager.getClaimAt(block.location)
@@ -413,6 +471,7 @@ class ProtectionListener(
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onBlockExplode(event: BlockExplodeEvent) {
+        if (!isWorldActive(event.block.world.name)) return
         val defaults = configProvider().defaultFlags
         event.blockList().removeIf { block ->
             val claim = claimManager.getClaimAt(block.location)
@@ -422,8 +481,20 @@ class ProtectionListener(
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onEntityChangeBlock(event: EntityChangeBlockEvent) {
-        if (event.entity is Player) return
+        val entity = event.entity
+        if (entity is Player || entity is FallingBlock) return
+        if (!isWorldActive(event.block.world.name)) return
         val claim = claimManager.getClaimAt(event.block.location) ?: return
+        if (entity is Projectile) {
+            val shooter = entity.shooter as? Player
+            if (shooter != null) {
+                if (!claim.hasPermission(shooter.uniqueId, ClaimPermission.BUILD, isBypassing(shooter))) {
+                    actionBar.sendDenial(shooter, "deny-build", mapOf("owner" to claim.ownerName()))
+                    event.isCancelled = true
+                }
+                return
+            }
+        }
         if (!claim.flag(ClaimFlag.MOB_GRIEFING, configProvider().defaultFlags)) {
             event.isCancelled = true
         }
@@ -431,6 +502,7 @@ class ProtectionListener(
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onBlockBurn(event: BlockBurnEvent) {
+        if (!isWorldActive(event.block.world.name)) return
         val claim = claimManager.getClaimAt(event.block.location) ?: return
         if (!claim.flag(ClaimFlag.FIRE_SPREAD, configProvider().defaultFlags)) {
             event.isCancelled = true
@@ -440,6 +512,7 @@ class ProtectionListener(
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onBlockSpread(event: BlockSpreadEvent) {
         if (event.source.type != Material.FIRE) return
+        if (!isWorldActive(event.block.world.name)) return
         val claim = claimManager.getClaimAt(event.block.location) ?: return
         if (!claim.flag(ClaimFlag.FIRE_SPREAD, configProvider().defaultFlags)) {
             event.isCancelled = true
@@ -448,6 +521,7 @@ class ProtectionListener(
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onBlockIgnite(event: BlockIgniteEvent) {
+        if (!isWorldActive(event.block.world.name)) return
         val player = event.player
         if (player != null) {
             if (!checkPermission(player, event.block.location, ClaimPermission.BUILD)) {
@@ -463,6 +537,7 @@ class ProtectionListener(
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onLiquidFlow(event: BlockFromToEvent) {
+        if (!isWorldActive(event.block.world.name)) return
         val fromClaim = claimManager.getTopLevelClaimAt(event.block.world.name, event.block.x, event.block.z)
         val toClaim = claimManager.getTopLevelClaimAt(event.toBlock.world.name, event.toBlock.x, event.toBlock.z)
         if (toClaim != null && toClaim.id != fromClaim?.id) {
@@ -472,14 +547,31 @@ class ProtectionListener(
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onPistonExtend(event: BlockPistonExtendEvent) {
-        checkPistonBoundary(event.block, event.blocks.map { it.getRelative(event.direction) } + event.blocks) {
+        if (!isWorldActive(event.block.world.name)) return
+        val affected = buildList {
+            add(event.block.getRelative(event.direction))
+            for (b in event.blocks) {
+                add(b)
+                add(b.getRelative(event.direction))
+            }
+        }
+        checkPistonBoundary(event.block, affected) {
             event.isCancelled = true
         }
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onPistonRetract(event: BlockPistonRetractEvent) {
-        checkPistonBoundary(event.block, event.blocks) {
+        if (!isWorldActive(event.block.world.name)) return
+        val affected = buildList {
+            for (b in event.blocks) {
+                add(b)
+                if (event.isSticky) {
+                    add(b.getRelative(event.direction))
+                }
+            }
+        }
+        checkPistonBoundary(event.block, affected) {
             event.isCancelled = true
         }
     }
@@ -492,6 +584,7 @@ class ProtectionListener(
         bossBar.hideAll(player)
         actionBar.clearSession(player.uniqueId)
         sessions.clear(player.uniqueId)
+        claimManager.clearTracking(player.uniqueId)
     }
 
     private inline fun checkPistonBoundary(piston: Block, affected: List<Block>, cancel: () -> Unit) {
@@ -527,8 +620,14 @@ class ProtectionListener(
         }
         if (type == Material.ANVIL || type == Material.CHIPPED_ANVIL || type == Material.DAMAGED_ANVIL ||
             type == Material.BEACON || type == Material.LECTERN || type == Material.FLOWER_POT ||
-            type == Material.CAULDRON || type == Material.WATER_CAULDRON || type == Material.JUKEBOX ||
-            type == Material.SWEET_BERRY_BUSH
+            type == Material.CAULDRON || type == Material.WATER_CAULDRON ||
+            type == Material.LAVA_CAULDRON || type == Material.POWDER_SNOW_CAULDRON ||
+            type == Material.JUKEBOX || type == Material.SWEET_BERRY_BUSH ||
+            type == Material.COMPOSTER || type == Material.CAMPFIRE || type == Material.SOUL_CAMPFIRE ||
+            type == Material.RESPAWN_ANCHOR || type == Material.BEEHIVE || type == Material.BEE_NEST ||
+            type == Material.CAVE_VINES || type == Material.CAVE_VINES_PLANT ||
+            type == Material.CAKE || type == Material.DECORATED_POT || type == Material.CHISELED_BOOKSHELF ||
+            type == Material.DRAGON_EGG || Tag.CANDLES.isTagged(type) || Tag.CANDLE_CAKES.isTagged(type)
         ) {
             return ClaimPermission.CONTAINER
         }

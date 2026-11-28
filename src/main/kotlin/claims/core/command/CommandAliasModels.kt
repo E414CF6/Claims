@@ -4,12 +4,23 @@ import java.util.*
 import java.util.regex.Matcher
 import java.util.regex.Pattern
 
+/**
+ * Classification of an alias entry managed by [CommandAliasService].
+ */
 enum class CommandAliasType {
+    /** Primary standalone alias generated for a registered subcommand (e.g. `/claim`). */
     BASE,
+
+    /** Secondary standalone alias generated from a subcommand's `aliases` list (e.g. `/tr`). */
     SUBBASE,
+
+    /** User-defined custom alias or macro loaded from `aliases.yml`. */
     CUSTOM,
 }
 
+/**
+ * Configuration and matching metadata for a single dynamic command alias.
+ */
 data class CommandAliasEntry(
     val alias: String,
     val commands: List<String>,
@@ -23,18 +34,22 @@ data class CommandAliasEntry(
     val addTabs: Boolean = false,
     val customTabs: List<String> = emptyList(),
 ) {
+    /** Lowercase root command token (before the first space) registered in Bukkit's CommandMap. */
     val baseCommand: String
         get() = alias.trim().substringBefore(' ').lowercase(Locale.ROOT)
 
+    /** Normalized permission suffix appended to `claims.customalias.` when [requiresPerm] is true. */
     val permissionKey: String
         get() = alias.trim().replace(" ", "").lowercase(Locale.ROOT)
 
+    /** `true` if any target command line references `$1`, `$1-`, or `{args}`. */
     val containsDynamicVariables: Boolean by lazy(LazyThreadSafetyMode.PUBLICATION) {
         commands.any { cmd ->
             DYNAMIC_VAR_PATTERN.matcher(cmd).find() || cmd.contains("{args}", ignoreCase = true)
         }
     }
 
+    /** Leading static command tokens before any `$n`, `[opt]`, or `{args}` placeholder. */
     val cleanCommand: String
         get() {
             val first = commands.firstOrNull()?.trim().orEmpty()
@@ -51,10 +66,19 @@ data class CommandAliasEntry(
         }
 
     companion object {
+        /** Matches positional (`$1`) or trailing-rest (`$1-`) argument placeholders. */
         val DYNAMIC_VAR_PATTERN: Pattern = Pattern.compile("\\$((\\d{1,2})(-?))(?!\\d)")
     }
 }
 
+/**
+ * Stateless matcher and template expander for dynamic command aliases.
+ *
+ * Matching precedence:
+ * 1. Exact alias match (longest alias wins on ties).
+ * 2. Prefix match when `exact == false` and the alias uses dynamic variables (`$1`, `$1-`, `{args}`).
+ * 3. Wildcard aliases ending with `?` (e.g. `myclaim ?`).
+ */
 object AliasMatcher {
 
     private val SPECIALIZED_PREFIXES = listOf(
@@ -72,14 +96,17 @@ object AliasMatcher {
         "delay:",
     )
 
+    /** Returns `true` if [line] starts with a specialized macro prefix (e.g. `console:`, `msg:`, `delay:`). */
     fun isSpecializedCommandLine(line: String): Boolean {
         val trimmed = line.trim().lowercase(Locale.ROOT)
         return SPECIALIZED_PREFIXES.any { trimmed.startsWith(it) }
     }
 
+    /** Returns `true` if the alias requires [SpecializedCommandExecutor] (multi-line or prefixed). */
     fun isSpecializedAlias(commands: List<String>): Boolean =
         commands.size != 1 || commands.firstOrNull()?.let { isSpecializedCommandLine(it) } == true
 
+    /** Finds the highest-priority enabled [CommandAliasEntry] matching [rawCommand] (without leading `/`). */
     fun findBestMatch(rawCommand: String, aliases: Map<String, CommandAliasEntry>): CommandAliasEntry? {
         val normalized = rawCommand.trim().lowercase(Locale.ROOT)
         if (normalized.isEmpty()) return null
@@ -134,18 +161,27 @@ object AliasMatcher {
         return wildcardMatch
     }
 
-    fun expandCommands(entry: CommandAliasEntry, rawCommand: String, senderName: String): List<String> {
+    /**
+     * Extracts the argument remainder after [entry]'s alias prefix (case-insensitive, stripping
+     * any trailing `?` wildcard marker).
+     */
+    fun extractRemainder(entry: CommandAliasEntry, rawCommand: String): String {
         val aliasPrefix = entry.alias.trim().let {
             if (it.endsWith("?")) it.removeSuffix("?").trim() else it
         }
         val trimmedRaw = rawCommand.trim()
-        val remainder = if (aliasPrefix.isNotEmpty() && trimmedRaw.length > aliasPrefix.length &&
+        return if (aliasPrefix.isNotEmpty() && trimmedRaw.length > aliasPrefix.length &&
             trimmedRaw.startsWith(aliasPrefix, ignoreCase = true)
         ) {
             trimmedRaw.substring(aliasPrefix.length).trim()
         } else {
             ""
         }
+    }
+
+    /** Expands all command templates in [entry] using arguments from [rawCommand] and [senderName]. */
+    fun expandCommands(entry: CommandAliasEntry, rawCommand: String, senderName: String): List<String> {
+        val remainder = extractRemainder(entry, rawCommand)
         val argTokens = if (remainder.isEmpty()) emptyList() else remainder.split(Regex("\\s+"))
 
         return entry.commands.map { template ->

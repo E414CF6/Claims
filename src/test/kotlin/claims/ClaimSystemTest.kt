@@ -2,26 +2,16 @@ package claims
 
 import claims.core.config.ClaimsConfig
 import claims.core.storage.DatabaseManager
-import claims.modules.claim.BoundingBox
-import claims.modules.claim.ClaimFlag
-import claims.modules.claim.ClaimManager
-import claims.modules.claim.ClaimPermission
-import claims.modules.claim.ClaimRepository
-import claims.modules.claim.ClaimResult
+import claims.modules.claim.*
 import org.bukkit.Material
 import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertFalse
-import org.junit.jupiter.api.Assertions.assertInstanceOf
-import org.junit.jupiter.api.Assertions.assertNotNull
-import org.junit.jupiter.api.Assertions.assertNull
-import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.nio.file.Path
-import java.util.UUID
+import java.util.*
 
 class ClaimSystemTest {
     private lateinit var db: DatabaseManager
@@ -167,6 +157,71 @@ class ClaimSystemTest {
         val cleaned = claimManager.cleanupUnusedClaims()
         assertEquals(1, cleaned)
         assertNull(claimManager.getTopLevelClaimAt("world", 55, 55))
+    }
+
+    @Test
+    fun `abandonRefundRatio below 1 deducts unrefunded penalty from owner balance`() {
+        val halfRefundCfg = defaultTestConfig().copy(abandonRefundRatio = 0.5)
+        val halfManager = ClaimManager(null, repo) { halfRefundCfg }.apply { loadAll() }
+        val owner = UUID.randomUUID()
+
+        val claim = assertInstanceOf(
+            ClaimResult.Success::class.java,
+            halfManager.createClaim(owner, BoundingBox.ofCorners("world", 0, -64, 0, 9, 319, 9))
+        ).claim
+        assertEquals(100, claim.bounds.area)
+        assertEquals(300, halfManager.getAvailableClaimBlocks(owner))
+
+        val refund = halfManager.deleteClaim(claim)
+        assertEquals(50, refund)
+        assertEquals(350, halfManager.getAvailableClaimBlocks(owner))
+    }
+
+    @Test
+    fun `extendClaim rejects inversion, resize validates children and world, and removeAllTrusts clears all`() {
+        val owner = UUID.randomUUID()
+        val friend1 = UUID.randomUUID()
+        val friend2 = UUID.randomUUID()
+
+        val claim = assertInstanceOf(
+            ClaimResult.Success::class.java,
+            claimManager.createClaim(owner, BoundingBox.ofCorners("world", 0, -64, 0, 9, 319, 9))
+        ).claim
+
+        val inverted = claimManager.extendClaimInDirection(claim, org.bukkit.block.BlockFace.WEST, -20)
+        val invertFail = assertInstanceOf(ClaimResult.Failure::class.java, inverted)
+        assertEquals(ClaimResult.Reason.TOO_SMALL, invertFail.reason)
+        assertEquals(0, claim.bounds.minX)
+
+        val wrongWorld = claimManager.resizeClaim(claim, BoundingBox.ofCorners("world_nether", 0, 0, 0, 9, 128, 9))
+        assertEquals(
+            ClaimResult.Reason.WORLD_DISABLED,
+            assertInstanceOf(ClaimResult.Failure::class.java, wrongWorld).reason
+        )
+
+        assertInstanceOf(
+            ClaimResult.Success::class.java,
+            claimManager.createSubclaim(claim, BoundingBox.ofCorners("world", 2, 60, 2, 7, 70, 7))
+        )
+        val shrinkPastChild = claimManager.resizeClaim(claim, BoundingBox.ofCorners("world", 0, -64, 0, 5, 319, 5))
+        assertEquals(
+            ClaimResult.Reason.OUTSIDE_PARENT,
+            assertInstanceOf(ClaimResult.Failure::class.java, shrinkPastChild).reason
+        )
+
+        claimManager.setTrust(claim, friend1.toString(), ClaimPermission.BUILD)
+        claimManager.setTrust(claim, friend2.toString(), ClaimPermission.ACCESS)
+        claimManager.setTrust(claim, Claim.PUBLIC_KEY, ClaimPermission.ACCESS)
+        claimManager.removeAllTrusts(claim)
+        assertTrue(claim.trusts.isEmpty())
+
+        val reloaded = ClaimManager(null, repo) { defaultTestConfig() }.apply { loadAll() }
+        val persisted = reloaded.getClaimById(claim.id)!!
+        assertTrue(persisted.trusts.isEmpty())
+
+        claimManager.setTrust(persisted, friend1.toString(), ClaimPermission.MANAGE)
+        claimManager.transferClaim(persisted, friend1)
+        assertFalse(persisted.trusts.containsKey(friend1.toString()))
     }
 
     companion object {

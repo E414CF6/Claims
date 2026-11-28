@@ -7,6 +7,10 @@ import claims.modules.claim.Claim
 import claims.modules.claim.ClaimManager
 import org.bukkit.entity.Player
 
+/**
+ * Dialog facade for claim management, routing to native Paper Dialogs on MC 1.21.6+
+ * or falling back cleanly to [ClaimMenus] / [DialogKit] Inventory GUIs on older versions.
+ */
 class ClaimDialogs(
     private val configProvider: () -> ClaimsConfig,
     private val messages: MessageService,

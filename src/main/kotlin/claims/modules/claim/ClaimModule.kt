@@ -15,6 +15,10 @@ import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
 import org.bukkit.event.Listener
 
+/**
+ * Feature module providing land claims, hierarchical trusts, subclaims, boundary visualization,
+ * ActionBar/BossBar territory HUDs, protection listeners, and `/claims` subcommands.
+ */
 class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
     override val id: String = "claim"
     override val description: String = "Land claims, trust matrix, subclaims, and territory protection"
@@ -33,25 +37,24 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
         sessions,
     )
 
-    lateinit var menus: ClaimMenus
-        private set
-    lateinit var dialogs: ClaimDialogs
-        private set
+    val dialogs: ClaimDialogs = ClaimDialogs(
+        { ctx.config },
+        ctx.messages,
+        claimManager,
+        ctx.dialogs,
+    ) { menus }
 
-    init {
-        dialogs = ClaimDialogs({ ctx.config }, ctx.messages, claimManager, ctx.dialogs) { menus }
-        menus = ClaimMenus(
-            { ctx.config },
-            ctx.messages,
-            claimManager,
-            boundaryVisualizer,
-            ctx.actionBar,
-            ctx.bossBar,
-            sessions,
-            ctx.dialogs,
-            { dialogs },
-        )
-    }
+    val menus: ClaimMenus = ClaimMenus(
+        ctx.scheduler,
+        { ctx.config },
+        ctx.messages,
+        claimManager,
+        boundaryVisualizer,
+        ctx.actionBar,
+        ctx.bossBar,
+        sessions,
+        ctx.dialogs,
+    ) { dialogs }
 
     override fun onEnable() {
         claimManager.loadAll()
@@ -95,6 +98,31 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
             } else emptyList()
         }
 
+        val untrustCompleter = SubcommandTabCompleter { sender, args ->
+            if (args.size <= 1) {
+                val prefix = args.firstOrNull().orEmpty()
+                val candidates = LinkedHashSet<String>()
+                if (sender is Player) {
+                    val claim = claimManager.getClaimAt(sender.location)
+                    if (claim != null) {
+                        for (key in claim.trusts.keys) {
+                            if (key == Claim.PUBLIC_KEY) {
+                                candidates += "public"
+                            } else {
+                                runCatching { Bukkit.getOfflinePlayer(java.util.UUID.fromString(key)).name }
+                                    .getOrNull()
+                                    ?.let { candidates += it }
+                            }
+                        }
+                    }
+                }
+                candidates += Bukkit.getOnlinePlayers().map { it.name }
+                candidates += "public"
+                candidates += "all"
+                candidates.filter { it.startsWith(prefix, ignoreCase = true) }
+            } else emptyList()
+        }
+
         val trustCompleter = SubcommandTabCompleter { _, args ->
             when (args.size) {
                 0, 1 -> {
@@ -116,6 +144,12 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
             name = "claim",
             description = "Create a land claim centered on your position",
             permission = "claims.claim",
+            tabCompleter = SubcommandTabCompleter { _, args ->
+                if (args.size <= 1) {
+                    val prefix = args.firstOrNull().orEmpty()
+                    listOf("5", "7", "10", "15", "20").filter { it.startsWith(prefix) }
+                } else emptyList()
+            },
         ) { sender, args ->
             val player = requirePlayer(sender) ?: return@registerSubcommand true
             val cfg = ctx.config
@@ -151,9 +185,20 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
         }
 
         registry.registerSubcommand(
+            name = "info",
+            description = "Inspect the claim at your current position",
+            permission = "claims.use",
+            aliases = listOf("inspect"),
+        ) { sender, _ ->
+            val player = requirePlayer(sender) ?: return@registerSubcommand true
+            toolService.handleInspectStick(player, player.location)
+            true
+        }
+
+        registry.registerSubcommand(
             name = "list",
             description = "Browse claims you own or are trusted in",
-            permission = "claims.claim",
+            permission = "claims.use",
             aliases = listOf("claimslist"),
         ) { sender, _ ->
             val player = requirePlayer(sender) ?: return@registerSubcommand true
@@ -187,6 +232,67 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
         }
 
         registry.registerSubcommand(
+            name = "rename",
+            description = "Rename the claim you are standing in",
+            permission = "claims.claim",
+        ) { sender, args ->
+            val player = requirePlayer(sender) ?: return@registerSubcommand true
+            val claim = claimManager.getClaimAt(player.location)
+            if (claim == null) {
+                ctx.messages.send(player, "not-in-claim")
+                return@registerSubcommand true
+            }
+            val adminBypass = sessions.state(player.uniqueId).adminBypass && player.hasPermission("claims.admin")
+            if (!claim.hasPermission(player.uniqueId, ClaimPermission.MANAGE, adminBypass)) {
+                ctx.actionBar.sendDenial(player, "deny-manage", mapOf("owner" to claim.ownerName()))
+                return@registerSubcommand true
+            }
+            val newName = args.joinToString(" ").trim().take(48)
+            if (newName.isEmpty()) {
+                ctx.messages.sendRaw(player, "<yellow>Usage: /claims rename <name></yellow>")
+                return@registerSubcommand true
+            }
+            claimManager.updateMetadata(claim, newName, claim.greeting)
+            ctx.messages.send(player, "claim-renamed", mapOf("name" to newName))
+            true
+        }
+
+        registry.registerSubcommand(
+            name = "greeting",
+            description = "Set or clear the entry greeting for the current claim",
+            permission = "claims.claim",
+            tabCompleter = SubcommandTabCompleter { _, args ->
+                if (args.size <= 1) listOf("clear").filter { it.startsWith(args.firstOrNull().orEmpty(), true) }
+                else emptyList()
+            },
+        ) { sender, args ->
+            val player = requirePlayer(sender) ?: return@registerSubcommand true
+            val claim = claimManager.getClaimAt(player.location)
+            if (claim == null) {
+                ctx.messages.send(player, "not-in-claim")
+                return@registerSubcommand true
+            }
+            val adminBypass = sessions.state(player.uniqueId).adminBypass && player.hasPermission("claims.admin")
+            if (!claim.hasPermission(player.uniqueId, ClaimPermission.MANAGE, adminBypass)) {
+                ctx.actionBar.sendDenial(player, "deny-manage", mapOf("owner" to claim.ownerName()))
+                return@registerSubcommand true
+            }
+            if (args.isEmpty()) {
+                ctx.messages.sendRaw(player, "<yellow>Usage: /claims greeting <message|clear></yellow>")
+                return@registerSubcommand true
+            }
+            if (args.size == 1 && args[0].equals("clear", ignoreCase = true)) {
+                claimManager.updateMetadata(claim, claim.name, null)
+                ctx.messages.send(player, "claim-greeting-cleared")
+                return@registerSubcommand true
+            }
+            val greeting = args.joinToString(" ").trim().take(100)
+            claimManager.updateMetadata(claim, claim.name, greeting)
+            ctx.messages.send(player, "claim-greeting-updated", mapOf("greeting" to greeting))
+            true
+        }
+
+        registry.registerSubcommand(
             name = "trust",
             description = "Grant claim permissions to a player",
             permission = "claims.claim",
@@ -210,13 +316,18 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
             }
             val targetName = args[0]
             val perm = args.getOrNull(1)?.let { ClaimPermission.parse(it) } ?: ClaimPermission.BUILD
-            val key = if (targetName.equals("public", ignoreCase = true)) {
-                Claim.PUBLIC_KEY
+            val (key, displayTarget) = if (targetName.equals("public", ignoreCase = true)) {
+                Claim.PUBLIC_KEY to "public"
             } else {
-                Bukkit.getOfflinePlayer(targetName).uniqueId.toString()
+                val offline = resolveKnownPlayer(targetName)
+                if (offline == null) {
+                    ctx.messages.send(player, "player-not-found", mapOf("target" to targetName))
+                    return@registerSubcommand true
+                }
+                offline.uniqueId.toString() to (offline.name ?: targetName)
             }
             claimManager.setTrust(claim, key, perm)
-            ctx.messages.send(player, "trust-updated", mapOf("target" to targetName, "level" to perm.displayName))
+            ctx.messages.send(player, "trust-updated", mapOf("target" to displayTarget, "level" to perm.displayName))
             true
         }
 
@@ -225,7 +336,7 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
             description = "Revoke a player's claim permissions",
             permission = "claims.claim",
             aliases = listOf("ut"),
-            tabCompleter = playerSuggest,
+            tabCompleter = untrustCompleter,
         ) { sender, args ->
             val player = requirePlayer(sender) ?: return@registerSubcommand true
             val claim = claimManager.getClaimAt(player.location)
@@ -243,10 +354,27 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
                 menus.openClaimTrustMenu(player, claim)
                 return@registerSubcommand true
             }
+            if (targetName.equals("all", ignoreCase = true)) {
+                claimManager.removeAllTrusts(claim)
+                ctx.messages.send(player, "trust-cleared-all")
+                return@registerSubcommand true
+            }
             val key = if (targetName.equals("public", ignoreCase = true)) {
                 Claim.PUBLIC_KEY
             } else {
-                Bukkit.getOfflinePlayer(targetName).uniqueId.toString()
+                resolveKnownPlayer(targetName)?.uniqueId?.toString()
+                    ?: claim.trusts.keys.firstOrNull { k ->
+                        k != Claim.PUBLIC_KEY && runCatching {
+                            Bukkit.getOfflinePlayer(java.util.UUID.fromString(k)).name.equals(
+                                targetName,
+                                ignoreCase = true
+                            )
+                        }.getOrDefault(false)
+                    }
+            }
+            if (key == null) {
+                ctx.messages.send(player, "player-not-found", mapOf("target" to targetName))
+                return@registerSubcommand true
             }
             claimManager.removeTrust(claim, key)
             ctx.messages.send(player, "trust-removed", mapOf("target" to targetName))
@@ -258,6 +386,12 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
             description = "Extend or shrink the current claim in your facing direction",
             permission = "claims.claim",
             aliases = listOf("extendclaim", "expandclaim", "expand"),
+            tabCompleter = SubcommandTabCompleter { _, args ->
+                if (args.size <= 1) {
+                    val prefix = args.firstOrNull().orEmpty()
+                    listOf("5", "10", "20", "-5").filter { it.startsWith(prefix) }
+                } else emptyList()
+            },
         ) { sender, args ->
             val player = requirePlayer(sender) ?: return@registerSubcommand true
             val claim = claimManager.getClaimAt(player.location)
@@ -322,15 +456,20 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
                 dialogs.openTransferClaimDialog(player, claim)
                 return@registerSubcommand true
             }
-            val offline = Bukkit.getOfflinePlayer(targetName)
+            val offline = resolveKnownPlayer(targetName)
+            if (offline == null) {
+                ctx.messages.send(player, "player-not-found", mapOf("target" to targetName))
+                return@registerSubcommand true
+            }
+            val resolvedName = offline.name ?: targetName
             ctx.dialogs.openConfirmationDialog(
                 player,
                 "<gold><bold>Confirm Ownership Transfer</bold></gold>",
-                "<gray>Transfer ownership of <white>${claim.name}</white> to <white>$targetName</white>?</gray>",
+                "<gray>Transfer ownership of <white>${claim.name}</white> to <white>$resolvedName</white>?</gray>",
                 "<gold>Transfer</gold>"
             ) { p ->
                 claimManager.transferClaim(claim, offline.uniqueId)
-                ctx.messages.send(p, "claim-transferred", mapOf("target" to targetName))
+                ctx.messages.send(p, "claim-transferred", mapOf("target" to resolvedName))
             }
             true
         }
@@ -344,7 +483,7 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
             val player = requirePlayer(sender) ?: return@registerSubcommand true
             val claim = claimManager.getClaimAt(player.location)
             if (claim == null || !claim.isSubclaim) {
-                ctx.messages.sendRaw(player, "<yellow>You must be standing inside a subclaim.</yellow>")
+                ctx.messages.send(player, "must-be-in-subclaim")
                 return@registerSubcommand true
             }
             val adminBypass = sessions.state(player.uniqueId).adminBypass && player.hasPermission("claims.admin")
@@ -397,7 +536,7 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
             val player = requirePlayer(sender) ?: return@registerSubcommand true
             val owned = claimManager.getPlayerClaims(player.uniqueId)
             if (owned.isEmpty()) {
-                ctx.messages.sendRaw(player, "<gray>You do not own any claims.</gray>")
+                ctx.messages.send(player, "no-claims-owned")
                 return@registerSubcommand true
             }
             ctx.dialogs.openConfirmationDialog(
@@ -423,10 +562,7 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
             val st = sessions.state(player.uniqueId)
             st.shovelMode = if (st.shovelMode == ShovelMode.SUBDIVIDE) ShovelMode.BASIC else ShovelMode.SUBDIVIDE
             ctx.actionBar.tickPlayer(player)
-            ctx.messages.sendRaw(
-                player,
-                "<aqua>Claim tool mode switched to <white>${st.shovelMode.label}</white>.</aqua>"
-            )
+            ctx.messages.send(player, "mode-switched", mapOf("mode" to st.shovelMode.label))
             true
         }
 
@@ -440,10 +576,7 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
             val st = sessions.state(player.uniqueId)
             st.shovelMode = if (st.shovelMode == ShovelMode.ADMIN) ShovelMode.BASIC else ShovelMode.ADMIN
             ctx.actionBar.tickPlayer(player)
-            ctx.messages.sendRaw(
-                player,
-                "<gold>Claim tool mode switched to <white>${st.shovelMode.label}</white>.</gold>"
-            )
+            ctx.messages.send(player, "mode-switched-admin", mapOf("mode" to st.shovelMode.label))
             true
         }
 
@@ -452,7 +585,17 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
             description = "Adjust bonus claim blocks for a player",
             permission = "claims.admin",
             aliases = listOf("adjustclaimblocks", "acb"),
-            tabCompleter = playerSuggest,
+            tabCompleter = SubcommandTabCompleter { _, args ->
+                when (args.size) {
+                    0, 1 -> Bukkit.getOnlinePlayers().map { it.name }
+                        .filter { it.startsWith(args.firstOrNull().orEmpty(), ignoreCase = true) }
+
+                    2 -> listOf("100", "500", "1000", "-500")
+                        .filter { it.startsWith(args[1]) }
+
+                    else -> emptyList()
+                }
+            },
         ) { sender, args ->
             if (args.size < 2) {
                 val player = sender as? Player
@@ -466,17 +609,21 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
             val targetName = args[0]
             val delta = args[1].toIntOrNull()
             if (delta == null) {
-                ctx.messages.sendRaw(sender, "<red>Amount must be a valid integer.</red>")
+                ctx.messages.send(sender, "invalid-integer")
                 return@registerSubcommand true
             }
-            val offline = Bukkit.getOfflinePlayer(targetName)
+            val offline = resolveKnownPlayer(targetName)
+            if (offline == null) {
+                ctx.messages.send(sender, "player-not-found", mapOf("target" to targetName))
+                return@registerSubcommand true
+            }
             claimManager.addBonusBlocks(offline.uniqueId, delta)
             val data = claimManager.getOrCreatePlayerData(offline.uniqueId)
             val avail = claimManager.getAvailableClaimBlocks(offline.uniqueId)
             ctx.messages.send(
                 sender,
                 "claim-blocks-adjusted",
-                mapOf("target" to targetName, "bonus" to data.bonusBlocks, "available" to avail)
+                mapOf("target" to (offline.name ?: targetName), "bonus" to data.bonusBlocks, "available" to avail)
             )
             true
         }
@@ -484,7 +631,7 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
         registry.registerSubcommand(
             name = "trapped",
             description = "Escape to nearby wilderness if trapped inside a claim",
-            permission = "claims.claim",
+            permission = "claims.use",
         ) { sender, _ ->
             val player = requirePlayer(sender) ?: return@registerSubcommand true
             val claim =
@@ -496,24 +643,24 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
             val b = claim.bounds
             val loc = player.location
             val candidates = listOf(
-                Location(player.world, (b.minX - 2).toDouble(), loc.y, loc.z),
-                Location(player.world, (b.maxX + 2).toDouble(), loc.y, loc.z),
-                Location(player.world, loc.x, loc.y, (b.minZ - 2).toDouble()),
-                Location(player.world, loc.x, loc.y, (b.maxZ + 2).toDouble())
+                Location(player.world, (b.minX - 2) + 0.5, loc.y, loc.z),
+                Location(player.world, (b.maxX + 2) + 0.5, loc.y, loc.z),
+                Location(player.world, loc.x, loc.y, (b.minZ - 2) + 0.5),
+                Location(player.world, loc.x, loc.y, (b.maxZ + 2) + 0.5)
             )
             val best =
                 candidates.filter { claimManager.getTopLevelClaimAt(it.world.name, it.blockX, it.blockZ) == null }
                     .minByOrNull { it.distanceSquared(loc) }
             if (best == null) {
-                ctx.messages.sendRaw(player, "<red>Could not find a nearby safe wilderness spot.</red>")
+                ctx.messages.send(player, "trapped-no-safe-spot")
                 return@registerSubcommand true
             }
-            val safeY = player.world.getHighestBlockYAt(best.blockX, best.blockZ) + 1
-            best.x = best.blockX + 0.5
-            best.y = safeY.toDouble()
-            best.z = best.blockZ + 0.5
-            player.teleport(best)
-            ctx.messages.send(player, "trapped-success")
+            ctx.scheduler.runAtLocation(best) {
+                val safeY = player.world.getHighestBlockYAt(best.blockX, best.blockZ) + 1
+                val dest = Location(player.world, best.blockX + 0.5, safeY.toDouble(), best.blockZ + 0.5)
+                player.teleportAsync(dest)
+                ctx.messages.send(player, "trapped-success")
+            }
             true
         }
 
@@ -525,7 +672,7 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
         ) { sender, _ ->
             val player = requirePlayer(sender) ?: return@registerSubcommand true
             toolService.cancelSelection(player)
-            ctx.messages.sendRaw(player, "<gray>Cleared active claim selection.</gray>")
+            ctx.messages.send(player, "selection-cleared")
             true
         }
     }
@@ -559,7 +706,7 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
         )
     }
 
-    private fun renderTerritoryHud(player: Player): Component? {
+    private fun renderTerritoryHud(player: Player): Component {
         val cfg = ctx.config
         val st = sessions.state(player.uniqueId)
         val claim = claimManager.getClaimAt(player.location)
@@ -635,11 +782,9 @@ class ClaimModule(private val ctx: ClaimsContext) : FeatureModule {
                 player, "claim-insufficient-blocks", mapOf("needed" to failure.needed, "available" to failure.available)
             )
 
-            ClaimResult.Reason.OUTSIDE_PARENT -> ctx.messages.sendRaw(
-                player, "<red>Subclaim cannot extend outside its parent claim.</red>"
-            )
-
-            else -> ctx.messages.sendRaw(player, "<red>Unable to create or update claim.</red>")
+            ClaimResult.Reason.OUTSIDE_PARENT -> ctx.messages.send(player, "outside-parent")
+            ClaimResult.Reason.WORLD_DISABLED -> ctx.messages.send(player, "world-disabled")
+            else -> ctx.messages.send(player, "claim-update-failed")
         }
     }
 

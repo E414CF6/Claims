@@ -2,18 +2,9 @@ package claims.modules.claim.ui
 
 import claims.core.config.ClaimsConfig
 import claims.core.locale.MessageService
-import claims.core.ui.ActionBarService
-import claims.core.ui.BossBarService
-import claims.core.ui.DialogKit
-import claims.core.ui.MenuItems
-import claims.core.ui.MenuWindow
-import claims.modules.claim.BoundaryVisualizer
-import claims.modules.claim.Claim
-import claims.modules.claim.ClaimFlag
-import claims.modules.claim.ClaimManager
-import claims.modules.claim.ClaimPermission
-import claims.modules.claim.ClaimSessionStore
-import claims.modules.claim.ShovelMode
+import claims.core.scheduler.PluginScheduler
+import claims.core.ui.*
+import claims.modules.claim.*
 import net.kyori.adventure.text.Component
 import org.bukkit.Bukkit
 import org.bukkit.Location
@@ -21,9 +12,14 @@ import org.bukkit.Material
 import org.bukkit.entity.Player
 import org.bukkit.event.inventory.ClickType
 import org.bukkit.inventory.ItemStack
-import java.util.UUID
+import java.util.*
 
+/**
+ * Inventory-based GUI windows for claim browsing, trust management, subclaims, admin tools,
+ * and MC `< 1.21.6` Dialog fallbacks.
+ */
 class ClaimMenus(
+    private val scheduler: PluginScheduler,
     private val configProvider: () -> ClaimsConfig,
     private val messages: MessageService,
     private val claimManager: ClaimManager,
@@ -200,11 +196,13 @@ class ClaimMenus(
         val window = MenuWindow(messages.renderRaw("<red><bold>Claims Admin Panel</bold></red>"), 3)
         window.fillBorder(Material.RED_STAINED_GLASS_PANE)
 
+        val dialogTag = if (dialogKit.supportsNativeDialogs) " (Dialog)" else ""
+
         window.set(
             11,
             MenuItems.item(
                 Material.GOLD_INGOT,
-                "<gold><bold>Adjust Claim Blocks (Dialog)</bold></gold>",
+                "<gold><bold>Adjust Claim Blocks$dialogTag</bold></gold>",
                 listOf("<gray>Add or subtract bonus claim blocks."),
                 messages,
             )
@@ -330,15 +328,17 @@ class ClaimMenus(
             openClaimTrustMenu(click.player, claim, 0)
         }
 
+        val dialogTag = if (dialogKit.supportsNativeDialogs) " (Dialog)" else ""
+
         if (canManage) {
             window.set(
                 11,
                 MenuItems.item(
                     Material.WRITABLE_BOOK,
-                    "<aqua><bold>Claim Name & Flags (Dialog)</bold></aqua>",
+                    "<aqua><bold>Claim Name & Flags$dialogTag</bold></aqua>",
                     listOf(
                         "<gray>Edit PvP, explosions, fire spread, mob griefing,",
-                        "<gray>and greeting message via Paper Dialog."
+                        "<gray>pistons, and greeting message."
                     ),
                     messages,
                 )
@@ -386,7 +386,7 @@ class ClaimMenus(
                 15,
                 MenuItems.item(
                     Material.NAME_TAG,
-                    "<gold><bold>Transfer Ownership (Dialog)</bold></gold>",
+                    "<gold><bold>Transfer Ownership$dialogTag</bold></gold>",
                     listOf("<gray>Transfer this claim to another player."),
                     messages,
                 )
@@ -429,12 +429,19 @@ class ClaimMenus(
         window.open(player)
     }
 
-    fun openSubclaimList(player: Player, parent: Claim) {
-        val window =
-            MenuWindow(messages.renderRaw("<light_purple><bold>Subclaims: ${parent.name}</bold></light_purple>"), 6)
+    fun openSubclaimList(player: Player, parent: Claim, page: Int = 0) {
+        val children = parent.children.toList()
+        val pageSize = 28
+        val totalPages = maxOf(1, (children.size + pageSize - 1) / pageSize)
+        val safePage = page.coerceIn(0, totalPages - 1)
+
+        val window = MenuWindow(
+            messages.renderRaw("<light_purple><bold>Subclaims: ${parent.name} (${safePage + 1}/$totalPages)</bold></light_purple>"),
+            6
+        )
         window.fillBorder(Material.PURPLE_STAINED_GLASS_PANE)
 
-        parent.children.take(28).forEachIndexed { idx, sub ->
+        children.drop(safePage * pageSize).take(pageSize).forEachIndexed { idx, sub ->
             val slot = MenuWindow.CONTENT_SLOTS[idx]
             window.set(
                 slot,
@@ -444,7 +451,7 @@ class ClaimMenus(
                     listOf(
                         "<gray>Isolated (inheritNothing):</gray> ${if (sub.inheritNothing) "<red>ON</red>" else "<green>OFF</green>"}",
                         "<gray>Bounds:</gray> <white>(${sub.bounds.minX}, ${sub.bounds.minY}, ${sub.bounds.minZ}) ~ (${sub.bounds.maxX}, ${sub.bounds.maxY}, ${sub.bounds.maxZ})</white>",
-                        "<yellow>Left-click: Settings Dialog (Name / Isolation)</yellow>",
+                        "<yellow>Left-click: Manage / Settings</yellow>",
                         "<aqua>Right-click: Visualize boundary</aqua>"
                     ),
                     messages,
@@ -454,8 +461,7 @@ class ClaimMenus(
                     click.player.closeInventory()
                     visualizer.showClaim(click.player, sub, Material.IRON_BLOCK)
                 } else {
-                    click.player.closeInventory()
-                    claimDialogsProvider().openSubclaimSettingsDialog(click.player, sub)
+                    openClaimDetail(click.player, sub)
                 }
             }
         }
@@ -472,11 +478,27 @@ class ClaimMenus(
                 messages,
             )
         )
+        if (safePage > 0) {
+            window.set(
+                45,
+                MenuItems.item(Material.ARROW, "<yellow>Previous Page</yellow>", emptyList(), messages)
+            ) { click ->
+                openSubclaimList(click.player, parent, safePage - 1)
+            }
+        }
         window.set(
             49,
             MenuItems.item(Material.OAK_DOOR, "<gray>Back to Parent Claim</gray>", emptyList(), messages)
         ) { click ->
             openClaimDetail(click.player, parent)
+        }
+        if (safePage + 1 < totalPages) {
+            window.set(
+                53,
+                MenuItems.item(Material.ARROW, "<yellow>Next Page</yellow>", emptyList(), messages)
+            ) { click ->
+                openSubclaimList(click.player, parent, safePage + 1)
+            }
         }
         window.open(player)
     }
@@ -540,23 +562,40 @@ class ClaimMenus(
             }
         }
 
+        val dialogTag = if (dialogKit.supportsNativeDialogs) " (Dialog)" else ""
         window.set(
             4,
             MenuItems.item(
                 Material.EMERALD,
-                "<green><bold>+ Add Trusted Player (Dialog)</bold></green>",
-                listOf("<gray>Open input & tier selector Dialog."),
+                "<green><bold>+ Add Trusted Player$dialogTag</bold></green>",
+                listOf("<gray>Grant claim trust to a player or public."),
                 messages,
             )
         ) { click ->
             click.player.closeInventory()
             claimDialogsProvider().openTrustAddDialog(click.player, claim)
         }
+        if (safePage > 0) {
+            window.set(
+                45,
+                MenuItems.item(Material.ARROW, "<yellow>Previous Page</yellow>", emptyList(), messages)
+            ) { click ->
+                openClaimTrustMenu(click.player, claim, safePage - 1)
+            }
+        }
         window.set(
             49,
             MenuItems.item(Material.OAK_DOOR, "<gray>Back to Claim Details</gray>", emptyList(), messages)
         ) { click ->
             openClaimDetail(click.player, claim)
+        }
+        if (safePage + 1 < totalPages) {
+            window.set(
+                53,
+                MenuItems.item(Material.ARROW, "<yellow>Next Page</yellow>", emptyList(), messages)
+            ) { click ->
+                openClaimTrustMenu(click.player, claim, safePage + 1)
+            }
         }
         window.open(player)
     }
@@ -568,11 +607,11 @@ class ClaimMenus(
         val window = MenuWindow(messages.renderRaw("<aqua><bold>Claim Flags: ${claim.name}</bold></aqua>"), 4)
         window.fillBorder(Material.GRAY_STAINED_GLASS_PANE)
 
-        val slots = listOf(10, 11, 12, 13, 14, 15, 16)
         ClaimFlag.entries.forEachIndexed { idx, flag ->
+            val slot = MenuWindow.CONTENT_SLOTS.getOrNull(idx) ?: return@forEachIndexed
             val enabled = claim.flag(flag, cfg.defaultFlags)
             window.set(
-                slots[idx],
+                slot,
                 MenuItems.item(
                     if (enabled) Material.LIME_DYE else Material.GRAY_DYE,
                     "<aqua>${flag.label}</aqua>",
@@ -583,6 +622,12 @@ class ClaimMenus(
                     messages,
                 )
             ) { click ->
+                val adminBypass =
+                    sessions.state(click.player.uniqueId).adminBypass && click.player.hasPermission("claims.admin")
+                if (!claim.hasPermission(click.player.uniqueId, ClaimPermission.MANAGE, adminBypass)) {
+                    actionBar.sendDenial(click.player, "deny-manage", mapOf("owner" to claim.ownerName()))
+                    return@set
+                }
                 val next = !claim.flag(flag, configProvider().defaultFlags)
                 claimManager.setFlag(claim, flag, next)
                 openClaimFlagsMenu(click.player, claim)
@@ -610,6 +655,12 @@ class ClaimMenus(
                 messages,
             )
         ) { click ->
+            val adminBypass =
+                sessions.state(click.player.uniqueId).adminBypass && click.player.hasPermission("claims.admin")
+            if (!claim.hasPermission(click.player.uniqueId, ClaimPermission.MANAGE, adminBypass)) {
+                actionBar.sendDenial(click.player, "deny-manage", mapOf("owner" to claim.ownerName()))
+                return@set
+            }
             claimManager.setTrust(claim, Claim.PUBLIC_KEY, ClaimPermission.ACCESS)
             openClaimTrustMenu(click.player, claim, 0)
         }
@@ -624,6 +675,12 @@ class ClaimMenus(
                     messages,
                 )
             ) { click ->
+                val adminBypass =
+                    sessions.state(click.player.uniqueId).adminBypass && click.player.hasPermission("claims.admin")
+                if (!claim.hasPermission(click.player.uniqueId, ClaimPermission.MANAGE, adminBypass)) {
+                    actionBar.sendDenial(click.player, "deny-manage", mapOf("owner" to claim.ownerName()))
+                    return@set
+                }
                 claimManager.setTrust(claim, online.uniqueId.toString(), ClaimPermission.BUILD)
                 openClaimTrustMenu(click.player, claim, 0)
             }
@@ -651,6 +708,12 @@ class ClaimMenus(
                     messages,
                 )
             ) { click ->
+                val adminBypass =
+                    sessions.state(click.player.uniqueId).adminBypass && click.player.hasPermission("claims.admin")
+                if (claim.ownerId != click.player.uniqueId && !adminBypass) {
+                    actionBar.sendDenial(click.player, "deny-manage", mapOf("owner" to claim.ownerName()))
+                    return@set
+                }
                 dialogKit.openConfirmationMenu(
                     click.player,
                     "<gold><bold>Confirm Ownership Transfer</bold></gold>",
@@ -707,7 +770,10 @@ class ClaimMenus(
         val world = Bukkit.getWorld(claim.bounds.worldName) ?: return
         val cx = (claim.bounds.minX + claim.bounds.maxX) / 2
         val cz = (claim.bounds.minZ + claim.bounds.maxZ) / 2
-        val cy = world.getHighestBlockYAt(cx, cz) + 1
-        player.teleport(Location(world, cx + 0.5, cy.toDouble(), cz + 0.5))
+        val probe = Location(world, cx + 0.5, 64.0, cz + 0.5)
+        scheduler.runAtLocation(probe) {
+            val cy = world.getHighestBlockYAt(cx, cz) + 1
+            player.teleportAsync(Location(world, cx + 0.5, cy.toDouble(), cz + 0.5))
+        }
     }
 }

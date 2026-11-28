@@ -6,6 +6,12 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
+/**
+ * Hierarchical claim trust tiers ordered from highest privilege ([OWNER]) to lowest ([ACCESS]).
+ *
+ * Because [isGrantedBy] compares [ordinal] values (`granted.ordinal <= this.ordinal`),
+ * granting a higher tier automatically satisfies all lower-tier checks.
+ */
 enum class ClaimPermission(val displayName: String, val denialKey: String) {
     OWNER("Owner", "deny-manage"),
     MANAGE("Manage", "deny-manage"),
@@ -13,9 +19,11 @@ enum class ClaimPermission(val displayName: String, val denialKey: String) {
     CONTAINER("Container", "deny-container"),
     ACCESS("Access", "deny-access");
 
+    /** Returns `true` if [granted] meets or exceeds this required permission tier. */
     fun isGrantedBy(granted: ClaimPermission?): Boolean =
         granted != null && granted.ordinal <= this.ordinal
 
+    /** Cycles through [TRUSTABLE_TIERS] for GUI trust-matrix clicks. */
     fun nextTrustTier(): ClaimPermission = when (this) {
         ACCESS -> CONTAINER
         CONTAINER -> BUILD
@@ -27,6 +35,7 @@ enum class ClaimPermission(val displayName: String, val denialKey: String) {
     companion object {
         val TRUSTABLE_TIERS = listOf(ACCESS, CONTAINER, BUILD, MANAGE)
 
+        /** Parses a command argument or shorthand (e.g. `a`, `ct`, `tr`, `manage`) into a trust tier. */
         fun parse(raw: String): ClaimPermission? = when (raw.lowercase()) {
             "access", "a", "at" -> ACCESS
             "container", "containers", "c", "ct" -> CONTAINER
@@ -37,6 +46,9 @@ enum class ClaimPermission(val displayName: String, val denialKey: String) {
     }
 }
 
+/**
+ * Per-claim boolean protection flags stored in `cl_claim_flags`.
+ */
 enum class ClaimFlag(val key: String, val label: String) {
     PVP("pvp", "Allow PvP"),
     EXPLOSIONS("explosions", "Allow Explosions"),
@@ -47,12 +59,21 @@ enum class ClaimFlag(val key: String, val label: String) {
     ENTRY_NOTIFY("entry_notify", "Entry Notification")
 }
 
+/**
+ * Active interaction mode of a player's claim tool (e.g., `GOLDEN_SHOVEL`).
+ */
 enum class ShovelMode(val label: String) {
     BASIC("Basic"),
     SUBDIVIDE("Subdivide"),
     ADMIN("Admin")
 }
 
+/**
+ * Axis-aligned 3D integer bounding box within [worldName].
+ *
+ * Top-level claims span full world height and use 2D X/Z containment, while subclaims
+ * honor Y bounds (`checkY = true`).
+ */
 data class BoundingBox(
     val worldName: String,
     val minX: Int,
@@ -64,6 +85,8 @@ data class BoundingBox(
 ) {
     val width: Int get() = (maxX - minX) + 1
     val length: Int get() = (maxZ - minZ) + 1
+
+    /** 2D X*Z footprint in blocks (clamped to [Int.MAX_VALUE] on overflow). */
     val area: Int get() = runCatching { Math.multiplyExact(width, length) }.getOrDefault(Int.MAX_VALUE)
 
     fun contains(x: Int, y: Int, z: Int, checkY: Boolean): Boolean {
@@ -84,6 +107,7 @@ data class BoundingBox(
     }
 
     companion object {
+        /** Normalizes any two opposite block corners into a valid min/max [BoundingBox]. */
         fun ofCorners(worldName: String, x1: Int, y1: Int, z1: Int, x2: Int, y2: Int, z2: Int): BoundingBox =
             BoundingBox(
                 worldName = worldName,
@@ -97,6 +121,13 @@ data class BoundingBox(
     }
 }
 
+/**
+ * In-memory representation of a land claim or subclaim.
+ *
+ * When [ownerId] is `null`, the claim is an administrative claim ([isAdminClaim]).
+ * When [parentId] is non-null, this is a subclaim ([isSubclaim]) that inherits its parent's
+ * trusts and flags unless [inheritNothing] is `true`.
+ */
 class Claim(
     val id: Long,
     var parentId: Long? = null,
@@ -165,3 +196,10 @@ data class PlayerClaimData(
 ) {
     fun totalBlocks(maxAccrued: Int): Int = accruedBlocks.coerceAtMost(maxAccrued) + bonusBlocks
 }
+
+/**
+ * Resolves an online or previously cached [org.bukkit.OfflinePlayer] by exact username
+ * without performing blocking Mojang HTTP lookups on the calling thread.
+ */
+fun resolveKnownPlayer(name: String): org.bukkit.OfflinePlayer? =
+    Bukkit.getPlayerExact(name) ?: runCatching { Bukkit.getOfflinePlayerIfCached(name) }.getOrNull()

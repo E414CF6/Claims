@@ -8,6 +8,10 @@ import org.bukkit.entity.Player
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Renders temporary client-side perimeter marker blocks (`sendBlockChange`) and corner
+ * particles for claims without modifying real world blocks.
+ */
 class BoundaryVisualizer(
     private val scheduler: PluginScheduler,
     private val configProvider: () -> ClaimsConfig
@@ -86,7 +90,12 @@ class BoundaryVisualizer(
         val step = maxOf(1, maxOf(bounds.width, bounds.length) / 24)
 
         fun surfaceAt(x: Int, z: Int): Location {
-            val y = world.getHighestBlockYAt(x, z).coerceIn(world.minHeight, world.maxHeight - 1)
+            // Guarded with runCatching so Folia cross-region perimeter lookups safely fall back to refY.
+            val y = runCatching {
+                world.getHighestBlockYAt(x, z).coerceIn(world.minHeight, world.maxHeight - 1)
+            }.getOrElse {
+                refY.coerceIn(world.minHeight, world.maxHeight - 1)
+            }
             val chosenY = if (kotlin.math.abs(y - refY) > 16) refY.coerceIn(world.minHeight, world.maxHeight - 1) else y
             return Location(world, x.toDouble(), chosenY.toDouble(), z.toDouble())
         }

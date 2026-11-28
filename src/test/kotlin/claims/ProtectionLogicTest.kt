@@ -13,12 +13,18 @@ import org.bukkit.Location
 import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.block.BlockFace
+import org.bukkit.block.data.BlockData
 import org.bukkit.block.data.type.Dispenser
 import org.bukkit.configuration.file.YamlConfiguration
-import org.bukkit.entity.Player
+import org.bukkit.damage.DamageSource
+import org.bukkit.entity.*
 import org.bukkit.event.block.BlockBreakEvent
 import org.bukkit.event.block.BlockDispenseEvent
 import org.bukkit.event.block.BlockFromToEvent
+import org.bukkit.event.block.BlockPistonExtendEvent
+import org.bukkit.event.entity.EntityChangeBlockEvent
+import org.bukkit.event.entity.EntityDamageByEntityEvent
+import org.bukkit.event.entity.EntityDamageEvent
 import org.bukkit.inventory.ItemStack
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
@@ -156,9 +162,104 @@ class ProtectionLogicTest {
             val dispenseEvent = BlockDispenseEvent(dispenserBlock, dummyStack, org.bukkit.util.Vector(1, 0, 0))
             listener.onDispense(dispenseEvent)
             assertTrue(dispenseEvent.isCancelled)
+
+            // FallingBlock (e.g. placed sand/gravel) must NOT be cancelled by MOB_GRIEFING=false
+            val fallingSand = proxyEntity(FallingBlock::class.java)
+            val dummyData = Proxy.newProxyInstance(
+                BlockData::class.java.classLoader,
+                arrayOf(BlockData::class.java)
+            ) { _, _, _ -> null } as BlockData
+            val sandLandEvent = EntityChangeBlockEvent(fallingSand, insideBlock, dummyData)
+            listener.onEntityChangeBlock(sandLandEvent)
+            assertFalse(sandLandEvent.isCancelled)
+
+            // Living mob (Enderman) altering a block inside claim IS cancelled when MOB_GRIEFING=false
+            val enderman = proxyEntity(Enderman::class.java)
+            val endermanEvent = EntityChangeBlockEvent(enderman, insideBlock, dummyData)
+            listener.onEntityChangeBlock(endermanEvent)
+            assertTrue(endermanEvent.isCancelled)
+
+            // Empty piston head extending across claim border IS cancelled when PISTON_CROSS_BORDER=false
+            val borderPiston = proxyRelativeBlock(world, -1, 64, 5, claimBorderBlock)
+            val emptyPistonExtend = BlockPistonExtendEvent(borderPiston, emptyList(), BlockFace.EAST)
+            listener.onPistonExtend(emptyPistonExtend)
+            assertTrue(emptyPistonExtend.isCancelled)
+
+            // Explosion damage to passive animals inside claim is blocked when EXPLOSIONS=false
+            val creeper = proxyEntity(Creeper::class.java)
+            val cow = proxyEntityAt(Cow::class.java, Location(world, 5.0, 64.0, 5.0), world)
+            val dummyDamageSource = proxyEntity(DamageSource::class.java)
+
+            @Suppress("DEPRECATION")
+            val creeperDamage = EntityDamageByEntityEvent(
+                creeper,
+                cow,
+                EntityDamageEvent.DamageCause.ENTITY_EXPLOSION,
+                dummyDamageSource,
+                10.0
+            )
+            listener.onEntityDamageByEntity(creeperDamage)
+            assertTrue(creeperDamage.isCancelled)
+
+            // Disabled world bypasses claim protection checks
+            val disabledCfg = cfg.copy(enabledWorlds = setOf("other_world"))
+            val disabledListener = ProtectionListener(
+                scheduler,
+                { disabledCfg },
+                messages,
+                claimManager,
+                toolService,
+                visualizer,
+                actionBar,
+                bossBar,
+                sessions
+            )
+            val disabledBreak = BlockBreakEvent(insideBlock, intruderPlayer)
+            disabledListener.onBlockBreak(disabledBreak)
+            assertFalse(disabledBreak.isCancelled)
         } finally {
             db.close()
         }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> proxyEntity(iface: Class<T>): T =
+        Proxy.newProxyInstance(iface.classLoader, arrayOf(iface)) { _, method, _ ->
+            when (method.name) {
+                "hashCode" -> 1
+                "equals" -> false
+                else -> null
+            }
+        } as T
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> proxyEntityAt(iface: Class<T>, loc: Location, world: World): T =
+        Proxy.newProxyInstance(iface.classLoader, arrayOf(iface)) { _, method, _ ->
+            when (method.name) {
+                "getLocation" -> loc
+                "getWorld" -> world
+                "hashCode" -> 2
+                "equals" -> false
+                else -> null
+            }
+        } as T
+
+    private fun proxyRelativeBlock(world: World, x: Int, y: Int, z: Int, relative: Block): Block {
+        val loc = Location(world, x.toDouble(), y.toDouble(), z.toDouble())
+        return Proxy.newProxyInstance(
+            Block::class.java.classLoader,
+            arrayOf(Block::class.java)
+        ) { _, method, _ ->
+            when (method.name) {
+                "getWorld" -> world
+                "getLocation" -> loc
+                "getX" -> x
+                "getY" -> y
+                "getZ" -> z
+                "getRelative" -> relative
+                else -> null
+            }
+        } as Block
     }
 
     private fun proxyWorld(name: String): World =

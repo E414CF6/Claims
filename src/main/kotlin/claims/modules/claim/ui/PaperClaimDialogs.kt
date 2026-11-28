@@ -2,10 +2,7 @@ package claims.modules.claim.ui
 
 import claims.core.config.ClaimsConfig
 import claims.core.locale.MessageService
-import claims.modules.claim.Claim
-import claims.modules.claim.ClaimFlag
-import claims.modules.claim.ClaimManager
-import claims.modules.claim.ClaimPermission
+import claims.modules.claim.*
 import io.papermc.paper.dialog.Dialog
 import io.papermc.paper.registry.data.dialog.ActionButton
 import io.papermc.paper.registry.data.dialog.DialogBase
@@ -15,7 +12,6 @@ import io.papermc.paper.registry.data.dialog.input.DialogInput
 import io.papermc.paper.registry.data.dialog.input.SingleOptionDialogInput
 import io.papermc.paper.registry.data.dialog.type.DialogType
 import net.kyori.adventure.text.event.ClickCallback
-import org.bukkit.Bukkit
 import org.bukkit.entity.Player
 
 /**
@@ -68,6 +64,11 @@ internal class PaperClaimDialogs(
                 .onTrue("true")
                 .onFalse("false")
                 .build(),
+            DialogInput.bool("piston_cross_border", messages.renderRaw("<gold>Allow Cross-Border Pistons</gold>"))
+                .initial(claim.flag(ClaimFlag.PISTON_CROSS_BORDER, cfg.defaultFlags))
+                .onTrue("true")
+                .onFalse("false")
+                .build(),
             DialogInput.bool("entry_notify", messages.renderRaw("<light_purple>Show Entry Notification</light_purple>"))
                 .initial(claim.flag(ClaimFlag.ENTRY_NOTIFY, cfg.defaultFlags))
                 .onTrue("true")
@@ -88,6 +89,8 @@ internal class PaperClaimDialogs(
                 response.getBoolean("fire_spread")?.let { claimManager.setFlag(claim, ClaimFlag.FIRE_SPREAD, it) }
                 response.getBoolean("mob_griefing")?.let { claimManager.setFlag(claim, ClaimFlag.MOB_GRIEFING, it) }
                 response.getBoolean("public_access")?.let { claimManager.setFlag(claim, ClaimFlag.PUBLIC_ACCESS, it) }
+                response.getBoolean("piston_cross_border")
+                    ?.let { claimManager.setFlag(claim, ClaimFlag.PISTON_CROSS_BORDER, it) }
                 response.getBoolean("entry_notify")?.let { claimManager.setFlag(claim, ClaimFlag.ENTRY_NOTIFY, it) }
 
                 messages.sendRaw(p, "<green>Saved settings for claim [<white>${claim.name}</white>].</green>")
@@ -168,7 +171,12 @@ internal class PaperClaimDialogs(
                 val key = if (rawTarget.equals("public", ignoreCase = true)) {
                     Claim.PUBLIC_KEY
                 } else {
-                    Bukkit.getOfflinePlayer(rawTarget).uniqueId.toString()
+                    val offline = resolveKnownPlayer(rawTarget)
+                    if (offline == null) {
+                        messages.send(p, "player-not-found", mapOf("target" to rawTarget))
+                        return@customClick
+                    }
+                    offline.uniqueId.toString()
                 }
                 claimManager.setTrust(claim, key, perm)
                 messages.send(p, "trust-updated", mapOf("target" to rawTarget, "level" to perm.displayName))
@@ -213,9 +221,13 @@ internal class PaperClaimDialogs(
                     messages.sendRaw(p, "<red>Please enter a target player name.</red>")
                     return@customClick
                 }
-                val offline = Bukkit.getOfflinePlayer(targetName)
+                val offline = resolveKnownPlayer(targetName)
+                if (offline == null) {
+                    messages.send(p, "player-not-found", mapOf("target" to targetName))
+                    return@customClick
+                }
                 claimManager.transferClaim(claim, offline.uniqueId)
-                messages.send(p, "claim-transferred", mapOf("target" to targetName))
+                messages.send(p, "claim-transferred", mapOf("target" to (offline.name ?: targetName)))
             }, oneShotOptions()))
             .build()
 
@@ -315,14 +327,18 @@ internal class PaperClaimDialogs(
                 val targetName = response.getText("target")?.trim().orEmpty()
                 if (targetName.isEmpty()) return@customClick
                 val delta = response.getFloat("amount")?.toInt() ?: 0
-                val offline = Bukkit.getOfflinePlayer(targetName)
+                val offline = resolveKnownPlayer(targetName)
+                if (offline == null) {
+                    messages.send(p, "player-not-found", mapOf("target" to targetName))
+                    return@customClick
+                }
                 claimManager.addBonusBlocks(offline.uniqueId, delta)
                 val data = claimManager.getOrCreatePlayerData(offline.uniqueId)
                 val avail = claimManager.getAvailableClaimBlocks(offline.uniqueId)
                 messages.send(
                     p,
                     "claim-blocks-adjusted",
-                    mapOf("target" to targetName, "bonus" to data.bonusBlocks, "available" to avail)
+                    mapOf("target" to (offline.name ?: targetName), "bonus" to data.bonusBlocks, "available" to avail)
                 )
             }, oneShotOptions()))
             .build()

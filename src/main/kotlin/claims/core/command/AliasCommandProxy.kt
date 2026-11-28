@@ -3,8 +3,12 @@ package claims.core.command
 import org.bukkit.Location
 import org.bukkit.command.CommandSender
 import org.bukkit.command.defaults.BukkitCommand
-import java.util.Locale
+import java.util.*
 
+/**
+ * Dynamic [BukkitCommand] proxy registered into the server's `CommandMap` for standalone
+ * subcommand aliases and custom aliases managed by [CommandAliasService].
+ */
 class AliasCommandProxy(
     aliasName: String,
     private val service: CommandAliasService,
