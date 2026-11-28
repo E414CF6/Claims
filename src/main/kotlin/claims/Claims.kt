@@ -54,11 +54,7 @@ class Claims : JavaPlugin() {
                 val schedMode = if (ctx.scheduler.isFolia) "Folia" else "Paper"
                 ctx.messages.sendRaw(
                     sender,
-                    "<aqua>Claims Status</aqua> <gray>|</gray> Claims: <white>${topClaims.size}</white> " +
-                            "<gray>(Subclaims: <white>$subclaimCount</white>) |</gray> " +
-                            "Modules: <white>${ctx.modules.activeModules().size}</white> <gray>|</gray> " +
-                            "Aliases: <white>${ctx.commandAliases.getAllAliases().size}</white> <gray>|</gray> " +
-                            "Runtime: <white>$schedMode / $uiMode</white>"
+                    "<aqua>Claims Status</aqua> <gray>|</gray> Claims: <white>${topClaims.size}</white> " + "<gray>(Subclaims: <white>$subclaimCount</white>) |</gray> " + "Modules: <white>${ctx.modules.activeModules().size}</white> <gray>|</gray> " + "Aliases: <white>${ctx.commandAliases.getAllAliases().size}</white> <gray>|</gray> " + "Runtime: <white>$schedMode / $uiMode</white>"
                 )
             },
         )
@@ -66,7 +62,8 @@ class Claims : JavaPlugin() {
         ctx.modules.registerAllSubcommands(ctx.commandRegistry)
 
         getCommand("claims")?.let {
-            it.executor = rootExecutor
+            // Use explicit setter because PluginCommand.getExecutor() (@NotNull) and setExecutor() (@Nullable) differ in nullability.
+            it.setExecutor(rootExecutor)
             it.tabCompleter = rootExecutor
         }
 
@@ -75,8 +72,7 @@ class Claims : JavaPlugin() {
 
         val uiMode = if (PlatformCompat.supportsDialogs) "Native Paper Dialogs" else "Legacy GUI Fallback"
         logger.info(
-            "Claims enabled on MC ${PlatformCompat.serverVersionLabel()} ($uiMode)! " +
-                    "Modules: ${ctx.modules.activeModules().size}, Aliases: ${ctx.commandAliases.getAllAliases().size}"
+            "Claims enabled on MC ${PlatformCompat.serverVersionLabel()} ($uiMode)! " + "Modules: ${ctx.modules.activeModules().size}, Aliases: ${ctx.commandAliases.getAllAliases().size}"
         )
     }
 
